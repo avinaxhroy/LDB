@@ -1,8 +1,10 @@
 # app/enrichers/lyrics.py
+
 import requests
 from bs4 import BeautifulSoup
 import re
 import random
+import time
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -21,11 +23,9 @@ class LyricsFetcher:
     def search_genius(self, title: str, artist: str) -> Optional[str]:
         """
         Search for a song on Genius and get the URL
-
         Args:
             title: Song title
             artist: Artist name
-
         Returns:
             Genius URL for the song or None if not found
         """
@@ -36,8 +36,8 @@ class LyricsFetcher:
             return cached_result
 
         search_url = f"https://genius.com/api/search/multi?q={title} {artist}"
-
         response = requests.get(search_url, headers=self.headers)
+
         if response.status_code != 200:
             return None
 
@@ -55,10 +55,8 @@ class LyricsFetcher:
                         result_artist = result.get("primary_artist", {}).get("name", "").lower()
                         if artist.lower() in result_artist or result_artist in artist.lower():
                             url = result.get("url")
-
                             # Cache the result for 30 days
                             redis_cache.set(cache_key, url, ttl_days=30)
-
                             return url
 
         return None
@@ -67,10 +65,8 @@ class LyricsFetcher:
     def scrape_genius_lyrics(self, url: str) -> Optional[str]:
         """
         Scrape lyrics from Genius
-
         Args:
             url: Genius URL
-
         Returns:
             Lyrics text or None if failed
         """
@@ -88,7 +84,6 @@ class LyricsFetcher:
 
         # Find lyrics container
         lyrics_container = soup.find("div", class_=re.compile(r"Lyrics__Container|lyrics|SongPage__Section"))
-
         if not lyrics_container:
             return None
 
@@ -97,17 +92,14 @@ class LyricsFetcher:
 
         # Cache the result for 30 days
         redis_cache.set(cache_key, lyrics_text, ttl_days=30)
-
         return lyrics_text
 
     def extract_excerpt(self, lyrics: str, lines: int = 6) -> str:
         """
         Extract an excerpt from the lyrics
-
         Args:
             lyrics: Full lyrics text
             lines: Number of lines to extract
-
         Returns:
             Lyrics excerpt
         """
@@ -146,10 +138,8 @@ class LyricsFetcher:
     def extract_from_youtube(self, youtube_id: str) -> Optional[str]:
         """
         Extract lyrics from YouTube description or comments
-
         Args:
             youtube_id: YouTube video ID
-
         Returns:
             Extracted lyrics or None if not found
         """
@@ -160,8 +150,8 @@ class LyricsFetcher:
             return cached_result
 
         url = f"https://www.youtube.com/watch?v={youtube_id}"
-
         response = requests.get(url, headers=self.headers)
+
         if response.status_code != 200:
             return None
 
@@ -169,10 +159,8 @@ class LyricsFetcher:
         description_match = re.search(r"(?:lyrics|Lyrics):\s*(.*?)(?:\n\n|\Z)", response.text, re.DOTALL)
         if description_match:
             lyrics = description_match.group(1).strip()
-
             # Cache the result for 30 days
             redis_cache.set(cache_key, lyrics, ttl_days=30)
-
             return lyrics
 
         # Look for lyrics section in description
@@ -194,10 +182,8 @@ class LyricsFetcher:
 
         if lyrics_lines:
             lyrics = "\n".join(lyrics_lines)
-
             # Cache the result for 30 days
             redis_cache.set(cache_key, lyrics, ttl_days=30)
-
             return lyrics
 
         return None
@@ -205,11 +191,9 @@ class LyricsFetcher:
     def get_lyrics(self, db: Session, song: Song) -> Optional[Tuple[str, str]]:
         """
         Get lyrics for a song using multiple methods
-
         Args:
             db: Database session
             song: Song object
-
         Returns:
             Tuple of (lyrics_excerpt, source_url) or None if not found
         """
@@ -238,12 +222,10 @@ class LyricsFetcher:
     def save_lyrics(self, db: Session, song: Song, lyrics_data: Tuple[str, str]) -> bool:
         """
         Save lyrics to database
-
         Args:
             db: Database session
             song: Song object
             lyrics_data: Tuple of (lyrics_excerpt, source_url)
-
         Returns:
             True if saved successfully, False otherwise
         """
@@ -266,6 +248,7 @@ class LyricsFetcher:
                 source_url=source_url,
                 fetched_at=datetime.utcnow()
             )
+
             db.add(lyrics)
 
         db.commit()
@@ -274,11 +257,9 @@ class LyricsFetcher:
     def run(self, db: Session, limit: int = 50) -> int:
         """
         Run lyrics fetching for songs without lyrics
-
         Args:
             db: Database session
             limit: Maximum number of songs to process
-
         Returns:
             Number of songs with lyrics successfully fetched
         """
@@ -287,7 +268,6 @@ class LyricsFetcher:
         songs = songs_query.limit(limit).all()
 
         fetched_count = 0
-
         for song in songs:
             try:
                 lyrics_data = self.get_lyrics(db, song)

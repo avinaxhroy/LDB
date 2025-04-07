@@ -1,4 +1,5 @@
 # app/enrichers/spotify.py
+
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 from typing import Dict, Any, List, Optional
@@ -9,6 +10,7 @@ from app.cache.redis_cache import redis_cache
 from app.core.utils import exponential_backoff_retry
 import time
 import json
+from datetime import datetime
 
 
 class SpotifyEnricher:
@@ -24,11 +26,9 @@ class SpotifyEnricher:
     def search_track(self, title: str, artist: str) -> Optional[Dict[str, Any]]:
         """
         Search for a track on Spotify
-
         Args:
             title: Track title
             artist: Artist name
-
         Returns:
             Dictionary containing track data or None if not found
         """
@@ -57,7 +57,6 @@ class SpotifyEnricher:
 
             # Cache the result for 24 hours
             redis_cache.set(cache_key, track_data, ttl_days=1)
-
             return track_data
 
         # Try a more lenient search if exact search fails
@@ -80,7 +79,6 @@ class SpotifyEnricher:
 
                 # Cache the result for 24 hours
                 redis_cache.set(cache_key, track_data, ttl_days=1)
-
                 return track_data
 
         return None
@@ -89,10 +87,8 @@ class SpotifyEnricher:
     def get_audio_features(self, spotify_id: str) -> Optional[Dict[str, Any]]:
         """
         Get audio features for a track
-
         Args:
             spotify_id: Spotify track ID
-
         Returns:
             Dictionary containing audio features or None if not found
         """
@@ -104,7 +100,6 @@ class SpotifyEnricher:
 
         # Get audio features
         features = self.spotify.audio_features(spotify_id)[0]
-
         if features:
             audio_data = {
                 "tempo": features["tempo"],
@@ -123,7 +118,6 @@ class SpotifyEnricher:
 
             # Cache the result for 14 days
             redis_cache.set(cache_key, audio_data, ttl_days=14)
-
             return audio_data
 
         return None
@@ -132,10 +126,8 @@ class SpotifyEnricher:
     def get_artist_data(self, artist_name: str) -> Optional[Dict[str, Any]]:
         """
         Get artist data from Spotify
-
         Args:
             artist_name: Name of the artist
-
         Returns:
             Dictionary containing artist data or None if not found
         """
@@ -161,7 +153,6 @@ class SpotifyEnricher:
 
             # Cache the result for 7 days
             redis_cache.set(cache_key, artist_data, ttl_days=7)
-
             return artist_data
 
         return None
@@ -169,11 +160,9 @@ class SpotifyEnricher:
     def enrich_song(self, db: Session, song: Song) -> bool:
         """
         Enrich a song with Spotify data
-
         Args:
             db: Database session
             song: Song object to enrich
-
         Returns:
             True if enriched successfully, False otherwise
         """
@@ -186,9 +175,10 @@ class SpotifyEnricher:
                     spotify_popularity=track_data["popularity"],
                     recorded_at=datetime.utcnow()
                 )
+
                 db.add(popularity_metric)
                 db.commit()
-            return True
+                return True
 
         # Search for the track
         track_data = self.search_track(song.title, song.artist)
@@ -199,7 +189,6 @@ class SpotifyEnricher:
         song.spotify_id = track_data["spotify_id"]
         song.title = track_data["title"]  # Use official title from Spotify
         song.artist = track_data["artist"]  # Use official artist name from Spotify
-
         db.add(song)
         db.commit()
         db.refresh(song)
@@ -210,6 +199,7 @@ class SpotifyEnricher:
             spotify_popularity=track_data["popularity"],
             recorded_at=datetime.utcnow()
         )
+
         db.add(popularity_metric)
 
         # Get and add audio features
@@ -231,6 +221,7 @@ class SpotifyEnricher:
                     song_id=song.id,
                     **features_data
                 )
+
                 db.add(audio_feature)
 
         db.commit()
@@ -239,11 +230,9 @@ class SpotifyEnricher:
     def run(self, db: Session, limit: int = 100) -> int:
         """
         Run Spotify enrichment for songs without Spotify data
-
         Args:
             db: Database session
             limit: Maximum number of songs to process
-
         Returns:
             Number of songs successfully enriched
         """
@@ -251,7 +240,6 @@ class SpotifyEnricher:
         songs = db.query(Song).filter(Song.spotify_id.is_(None)).limit(limit).all()
 
         enriched_count = 0
-
         for song in songs:
             try:
                 success = self.enrich_song(db, song)

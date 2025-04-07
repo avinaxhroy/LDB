@@ -1,4 +1,5 @@
 # app/scheduler/jobs.py
+
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -121,7 +122,6 @@ def calculate_engagement_scores():
     try:
         # Get all songs with popularity metrics
         songs = db.query(Song).all()
-
         for song in songs:
             # Get the latest popularity metrics
             latest_metrics = db.query(PopularityMetric).filter(
@@ -155,6 +155,7 @@ def calculate_engagement_scores():
                 score=engagement_score,
                 calculated_at=datetime.utcnow()
             )
+
             db.add(new_score)
 
         db.commit()
@@ -163,6 +164,30 @@ def calculate_engagement_scores():
         logger.error(f"Engagement score calculation error: {str(e)}")
     finally:
         db.close()
+
+
+def process_embeddings_job():
+    """Process embeddings for songs without embeddings"""
+    from app.worker import process_embeddings
+    process_embeddings.delay(100)
+
+
+def process_genre_tags_job():
+    """Process genre tags for songs"""
+    from app.worker import process_genre_tags
+    process_genre_tags.delay(200)
+
+
+def optimize_database_job():
+    """Run database optimization"""
+    from app.worker import optimize_database
+    optimize_database.delay()
+
+
+def update_trending_job():
+    """Update trending songs and artists"""
+    from app.worker import update_trending
+    update_trending.delay()
 
 
 def initialize_scheduler():
@@ -221,7 +246,31 @@ def initialize_scheduler():
         id='engagement_calculation'
     )
 
+    # Add new jobs
+    scheduler.add_job(
+        process_embeddings_job,
+        CronTrigger(hour='*/3'),  # Every 3 hours
+        id='process_embeddings'
+    )
+
+    scheduler.add_job(
+        process_genre_tags_job,
+        CronTrigger(hour='2'),  # Daily at 2 AM
+        id='process_genre_tags'
+    )
+
+    scheduler.add_job(
+        optimize_database_job,
+        CronTrigger(day_of_week='sun', hour='3'),  # Weekly on Sunday at 3 AM
+        id='optimize_database'
+    )
+
+    scheduler.add_job(
+        update_trending_job,
+        CronTrigger(hour='*/1'),  # Hourly
+        id='update_trending'
+    )
+
     # Start the scheduler
     scheduler.start()
-
     return scheduler

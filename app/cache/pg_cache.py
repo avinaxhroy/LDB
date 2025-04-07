@@ -1,4 +1,5 @@
 # app/cache/pg_cache.py
+
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 import json
@@ -12,7 +13,6 @@ class PostgresCache:
         try:
             # Check if key already exists
             existing_cache = db.query(CacheData).filter(CacheData.key == key).first()
-
             ttl = datetime.utcnow() + timedelta(days=ttl_days)
 
             if existing_cache:

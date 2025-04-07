@@ -1,4 +1,5 @@
 # app/cache/redis_cache.py
+
 import json
 import redis
 from datetime import datetime, timedelta
@@ -15,7 +16,7 @@ class RedisCache:
                     port=settings.REDIS_PORT,
                     db=settings.REDIS_DB,
                     password=settings.REDIS_PASSWORD or None,
-                    decode_responses=True,
+                    decode_responses=True
                 )
                 self.enabled = True
             except Exception as e:

@@ -8,9 +8,10 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.models import Song
 from app.core.utils import exponential_backoff_retry
+from app.collectors.base_collector import BaseCollector
 
 
-class RedditCollector:
+class RedditCollector(BaseCollector):
     def __init__(self):
         self.reddit = praw.Reddit(
             client_id=settings.REDDIT_CLIENT_ID,
@@ -112,17 +113,27 @@ class RedditCollector:
         saved_songs = []
 
         for mention in music_mentions:
+            # Try to extract artist from title
+            artist = "Unknown"
+            title = mention['title']
+
+            # Try to parse artist from title
+            if " - " in title:
+                parts = title.split(" - ", 1)
+                artist = parts[0].strip()
+                title = parts[1].strip()
+
             # Check if song already exists in DB (avoid duplicates)
             existing_song = db.query(Song).filter(
-                Song.title == mention['title'],
+                Song.title == title,
                 Song.source == 'reddit'
             ).first()
 
             if not existing_song:
                 # Create new song entry
                 song = Song(
-                    title=mention['title'],
-                    artist="Unknown",  # We'll need to extract or enrich this later
+                    title=title,
+                    artist=artist,
                     source='reddit',
                     source_url=mention['source_url'],
                 )
@@ -131,6 +142,10 @@ class RedditCollector:
                 db.commit()
                 db.refresh(song)
                 saved_songs.append(song)
+
+                # Add this line to trigger artist catalog collection
+                if artist != "Unknown":
+                    self.check_and_collect_artist_catalog(db, artist)
 
         return saved_songs
 

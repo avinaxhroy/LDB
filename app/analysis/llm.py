@@ -1,9 +1,10 @@
 # app/analysis/llm.py
+
 import requests
 import json
 import time
-from typing import Dict, Any, List, Optional, Tuple, Union
-from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional, Tuple
+from datetime import datetime
 from sqlalchemy.orm import Session
 from app.db.models import Song, Lyrics, AIReview, AudioFeature
 from app.cache.redis_cache import redis_cache
@@ -19,94 +20,100 @@ logger = logging.getLogger(__name__)
 
 class LLMAnalyzer:
     def __init__(self):
-        # Configure API keys
-        api_key_manager.add_key(
-            service='openrouter',
-            key=settings.OPENROUTER_API_KEY,
-            rate_limit=settings.OPENROUTER_RATE_LIMIT,
-            time_window=settings.OPENROUTER_TIME_WINDOW
-        )
+        # Configure API keys for different providers
+        # OpenRouter (DeepSeek V3)
+        for i, key in enumerate(settings.OPENROUTER_API_KEYS.split(',')):
+            if key.strip():
+                api_key_manager.add_key(
+                    service='openrouter',
+                    key=key.strip(),
+                    rate_limit=settings.OPENROUTER_RATE_LIMIT,
+                    time_window=settings.OPENROUTER_TIME_WINDOW
+                )
+                logger.info(f"Added OpenRouter API key {i + 1}")
 
-        # Add Requesty.ai API key for Gemini 2.5 Pro
-        if settings.REQUESTY_API_KEY:
-            api_key_manager.add_key(
-                service='requesty',
-                key=settings.REQUESTY_API_KEY,
-                rate_limit=settings.REQUESTY_RATE_LIMIT,
-                time_window=settings.REQUESTY_TIME_WINDOW
-            )
+        # Requesty.ai (Gemini 2.5)
+        for i, key in enumerate(settings.REQUESTY_API_KEYS.split(',')):
+            if key.strip():
+                api_key_manager.add_key(
+                    service='requesty',
+                    key=key.strip(),
+                    rate_limit=settings.REQUESTY_RATE_LIMIT,
+                    time_window=settings.REQUESTY_TIME_WINDOW
+                )
+                logger.info(f"Added Requesty API key {i + 1}")
 
-    def prepare_analysis_prompt(self, song: Song, lyrics: Optional[str], audio_features: Optional[Dict]) -> str:
+        # Together.ai (Llama 3.3 or DeepSeek R1)
+        for i, key in enumerate(settings.TOGETHER_API_KEYS.split(',')):
+            if key.strip():
+                api_key_manager.add_key(
+                    service='together',
+                    key=key.strip(),
+                    rate_limit=settings.TOGETHER_RATE_LIMIT,
+                    time_window=settings.TOGETHER_TIME_WINDOW
+                )
+                logger.info(f"Added Together API key {i + 1}")
+
+        # Provider priority order
+        self.provider_priority = ["openrouter", "requesty", "together"]
+
+        # Provider model mapping
+        self.provider_models = {
+            "openrouter": settings.OPENROUTER_MODEL,
+            "requesty": settings.REQUESTY_MODEL,
+            "together": settings.TOGETHER_MODEL
+        }
+
+    def prepare_analysis_prompt(self, songs: List[Dict], include_lyrics: bool = True) -> str:
         """
-        Prepare a prompt for LLM analysis
-
+        Prepare a prompt for batch analysis of multiple songs
         Args:
-            song: Song object
-            lyrics: Lyrics excerpt (if available)
-            audio_features: Audio features (if available)
-
+            songs: List of song dictionaries with metadata and optional lyrics
+            include_lyrics: Whether to include lyrics in the prompt
         Returns:
             Analysis prompt
         """
-        prompt = f"""
-        Please analyze this Desi Hip-Hop song:
-
-        Title: {song.title}
-        Artist: {song.artist}
-        """
-
-        if lyrics:
-            prompt += f"""
-            Lyrics excerpt:
-            {lyrics}
-            """
-
-        if audio_features:
-            prompt += f"""
-            Audio features:
-            - Tempo: {audio_features.get('tempo', 'Unknown')} BPM
-            - Valence (musical positiveness): {audio_features.get('valence', 'Unknown')} (0-1)
-            - Energy: {audio_features.get('energy', 'Unknown')} (0-1)
-            - Danceability: {audio_features.get('danceability', 'Unknown')} (0-1)
-            - Acousticness: {audio_features.get('acousticness', 'Unknown')} (0-1)
-            - Instrumentalness: {audio_features.get('instrumentalness', 'Unknown')} (0-1)
-            - Liveness: {audio_features.get('liveness', 'Unknown')} (0-1)
-            - Speechiness: {audio_features.get('speechiness', 'Unknown')} (0-1)
-            """
+        prompt = "Please analyze the following Desi Hip-Hop songs:\n\n"
+        for i, song in enumerate(songs, 1):
+            prompt += f"SONG {i}:\n"
+            prompt += f"Title: {song['title']}\n"
+            prompt += f"Artist: {song['artist']}\n"
+            if include_lyrics and song.get('lyrics'):
+                prompt += f"Lyrics excerpt:\n{song['lyrics']}\n"
+            if song.get('audio_features'):
+                af = song['audio_features']
+                prompt += f"Audio features:\n"
+                prompt += f"- Tempo: {af.get('tempo', 'Unknown')} BPM\n"
+                prompt += f"- Valence: {af.get('valence', 'Unknown')} (0-1)\n"
+                prompt += f"- Energy: {af.get('energy', 'Unknown')} (0-1)\n"
+                prompt += f"- Danceability: {af.get('danceability', 'Unknown')} (0-1)\n"
+            prompt += "\n"
 
         prompt += """
-        Please provide the following analysis in JSON format:
+        For EACH song, provide the following analysis in a JSON array format:
+        1. "song_id": ID number of the song (as given in the prompt)
+        2. "sentiment": Overall sentiment (positive, negative, or neutral)
+        3. "emotion": Primary emotion expressed
+        4. "topic": Main topic or theme
+        5. "lyric_complexity": Rating from 0 to 1 (0 = simple, 1 = complex)
+        6. "description": A concise 2-3 sentence review of the song
+        7. "uniqueness_score": Rating from 0 to 1 based on originality
+        8. "underrated_score": Rating from 0 to 1 (how underrated this song is)
+        9. "quality_score": Overall quality rating from 0 to 1
 
-        1. sentiment: Overall sentiment (positive, negative, or neutral)
-        2. sentiment_score: Numerical score for sentiment from -1.0 (very negative) to 1.0 (very positive)
-        3. emotion: Primary emotion expressed (e.g., joy, anger, sadness, excitement)
-        4. emotion_secondary: Secondary emotion expressed
-        5. topic: Main topic or theme of the lyrics
-        6. subtopics: List of up to 3 subtopics in the lyrics
-        7. lyric_complexity: Rating from 0 to 1 (0 = simple, 1 = complex)
-        8. description: A concise 2-3 sentence review of the song
-        9. uniqueness_score: Rating from 0 to 1 based on originality
-        10. underrated_score: Rating from 0 to 1 (how underrated is this song)
-        11. quality_score: Overall quality rating from 0 to 1
-        12. target_audience: Likely target audience for this song
-        13. stylistic_influences: List of up to 3 likely stylistic influences
-        14. lyrical_themes: List of up to 3 main lyrical themes
-
-        Respond with JSON only, no extra text.
+        Respond with a valid JSON array containing one object for each song. Format example:
+        [{"song_id": 1, "sentiment": "positive", ...}, {"song_id": 2, ...}]
         """
-
         return prompt
 
     @exponential_backoff_retry(max_retries=3)
-    def call_openrouter_api(self, prompt: str) -> Optional[Dict[str, Any]]:
+    def call_openrouter_api(self, prompt: str) -> Optional[List[Dict[str, Any]]]:
         """
-        Call the OpenRouter API for DeepSeek model
-
+        Call the OpenRouter API for DeepSeek V3
         Args:
             prompt: The prompt to send
-
         Returns:
-            Response from OpenRouter or None if failed
+            List of song analyses or None if failed
         """
         # Get API key from manager
         api_key = api_key_manager.get_key('openrouter')
@@ -117,79 +124,64 @@ class LLMAnalyzer:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
-            "HTTP-Referer": "https://desi-hiphop-app.example.com",  # Add your actual domain in production
-            "X-Title": "Desi Hip-Hop Analysis"  # Help OpenRouter understand your use case
+            "HTTP-Referer": "https://desi-hiphop-app.example.com",
+            "X-Title": "Desi Hip-Hop Analysis"
         }
 
         data = {
-            "model": settings.OPENROUTER_MODEL,
+            "model": self.provider_models["openrouter"],
             "messages": [
                 {"role": "system",
-                 "content": "You are a music analyst specialized in Hip-Hop, especially Desi Hip-Hop. Provide detailed, accurate analyses and always respond in the exact JSON format requested."},
+                 "content": "You are a music analyst specialized in Hip-Hop, especially Desi Hip-Hop. Provide analyses in JSON format."},
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.7,
-            "max_tokens": 1000,
-            "response_format": {"type": "json_object"}  # Request JSON format specifically
+            "max_tokens": 1500,
+            "response_format": {"type": "json_object"}
         }
 
         try:
-            logger.info(f"Calling OpenRouter API with model {settings.OPENROUTER_MODEL}")
+            logger.info(f"Calling OpenRouter API with model {self.provider_models['openrouter']}")
             response = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers=headers,
                 json=data,
-                timeout=30  # Add timeout
+                timeout=60
             )
 
             if response.status_code != 200:
                 logger.error(f"OpenRouter API error: {response.status_code} {response.text}")
                 if response.status_code == 429:  # Rate limit
                     logger.warning(f"Rate limit hit for OpenRouter. Disabling key temporarily.")
-                    api_key_manager.disable_key('openrouter', api_key, 300)  # Disable for 5 minutes
+                    api_key_manager.disable_key('openrouter', api_key, 300)
                 return None
 
             result = response.json()
             content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
 
-            # Extract JSON from content
+            # Parse JSON from content
             try:
-                # If the response format is already JSON, parse it directly
                 return json.loads(content)
             except json.JSONDecodeError:
-                # If parsing fails, try to extract JSON from the text
-                logger.warning(f"Failed to parse direct JSON, attempting extraction")
-                json_start = content.find('{')
-                json_end = content.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    json_str = content[json_start:json_end]
-                    try:
-                        return json.loads(json_str)
-                    except json.JSONDecodeError:
-                        logger.error(f"Failed to extract JSON: {json_str}")
-                        return None
-                logger.error(f"No JSON found in response: {content}")
+                logger.error(f"Failed to parse JSON from response: {content}")
                 return None
-
         except Exception as e:
             logger.error(f"Error calling OpenRouter API: {str(e)}")
             return None
 
     @exponential_backoff_retry(max_retries=3)
-    def call_requesty_gemini_api(self, prompt: str) -> Optional[Dict[str, Any]]:
+    def call_requesty_api(self, prompt: str) -> Optional[List[Dict[str, Any]]]:
         """
-        Call the Requesty.ai Gemini 2.5 Pro API as a fallback
-
+        Call the Requesty.ai API for Gemini 2.5 Pro
         Args:
             prompt: The prompt to send
-
         Returns:
-            Response from Gemini or None if failed
+            List of song analyses or None if failed
         """
         # Get API key from manager
         api_key = api_key_manager.get_key('requesty')
         if not api_key:
-            logger.warning("No available Requesty.ai API key")
+            logger.warning("No available Requesty API key")
             return None
 
         headers = {
@@ -198,316 +190,265 @@ class LLMAnalyzer:
         }
 
         data = {
-            "model": settings.REQUESTY_MODEL,
+            "model": self.provider_models["requesty"],
             "messages": [
                 {"role": "system",
-                 "content": "You are a music analyst specialized in Hip-Hop, especially Desi Hip-Hop. Provide detailed, accurate analyses and always respond in the exact JSON format requested."},
+                 "content": "You are a music analyst specialized in Hip-Hop, especially Desi Hip-Hop. Provide analyses in JSON format."},
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.7,
-            "max_tokens": 1000,
-            "response_format": {"type": "json_object"}  # Request JSON format specifically
+            "max_tokens": 1500,
+            "response_format": {"type": "json_object"}
         }
 
         try:
-            logger.info(f"Calling Requesty.ai API with model {settings.REQUESTY_MODEL}")
+            logger.info(f"Calling Requesty API with model {self.provider_models['requesty']}")
             response = requests.post(
                 "https://api.requesty.ai/v1/chat/completions",
                 headers=headers,
                 json=data,
-                timeout=30  # Add timeout
+                timeout=60
             )
 
             if response.status_code != 200:
-                logger.error(f"Requesty.ai API error: {response.status_code} {response.text}")
+                logger.error(f"Requesty API error: {response.status_code} {response.text}")
                 if response.status_code == 429:  # Rate limit
-                    logger.warning(f"Rate limit hit for Requesty.ai. Disabling key temporarily.")
-                    api_key_manager.disable_key('requesty', api_key, 300)  # Disable for 5 minutes
+                    logger.warning(f"Rate limit hit for Requesty. Disabling key temporarily.")
+                    api_key_manager.disable_key('requesty', api_key, 300)
                 return None
 
             result = response.json()
             content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
 
-            # Extract JSON from content
+            # Parse JSON from content
             try:
-                # If the response format is already JSON, parse it directly
                 return json.loads(content)
             except json.JSONDecodeError:
-                # If parsing fails, try to extract JSON from the text
-                logger.warning(f"Failed to parse direct JSON from Requesty.ai, attempting extraction")
-                json_start = content.find('{')
-                json_end = content.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    json_str = content[json_start:json_end]
-                    try:
-                        return json.loads(json_str)
-                    except json.JSONDecodeError:
-                        logger.error(f"Failed to extract JSON from Requesty.ai: {json_str}")
-                        return None
-                logger.error(f"No JSON found in Requesty.ai response: {content}")
+                logger.error(f"Failed to parse JSON from response: {content}")
                 return None
-
         except Exception as e:
-            logger.error(f"Error calling Requesty.ai API: {str(e)}")
+            logger.error(f"Error calling Requesty API: {str(e)}")
             return None
 
-    def analyze_song(self, db: Session, song: Song) -> bool:
+    @exponential_backoff_retry(max_retries=3)
+    def call_together_api(self, prompt: str) -> Optional[List[Dict[str, Any]]]:
         """
-        Analyze a song with LLM, using OpenRouter first and falling back to Requesty.ai if needed
+        Call the Together.ai API for Llama 3.3 or DeepSeek R1
 
         Args:
-            db: Database session
-            song: Song object to analyze
+            prompt: The prompt to send
 
         Returns:
-            True if analyzed successfully, False otherwise
+            List of song analyses or None if failed
         """
-        # Check cache first
-        cache_key = f"llm_analysis:{song.id}"
-        cached_result = redis_cache.get(cache_key)
-        if cached_result:
-            logger.info(f"Using cached analysis for song {song.id}")
-            return self.save_analysis(db, song, cached_result)
+        # Get API key from manager
+        api_key = api_key_manager.get_key('together')
+        if not api_key:
+            logger.warning("No available Together API key")
+            return None
 
-        # Get lyrics if available
-        lyrics_obj = db.query(Lyrics).filter(Lyrics.song_id == song.id).first()
-        lyrics_text = lyrics_obj.excerpt if lyrics_obj else None
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
 
-        # Get audio features if available
-        audio_features_obj = db.query(AudioFeature).filter(AudioFeature.song_id == song.id).first()
-        audio_features = None
-        if audio_features_obj:
-            audio_features = {
-                'tempo': audio_features_obj.tempo,
-                'valence': audio_features_obj.valence,
-                'energy': audio_features_obj.energy,
-                'danceability': audio_features_obj.danceability,
-                'acousticness': audio_features_obj.acousticness,
-                'instrumentalness': audio_features_obj.instrumentalness,
-                'liveness': audio_features_obj.liveness,
-                'speechiness': audio_features_obj.speechiness
-            }
+        data = {
+            "model": self.provider_models["together"],
+            "prompt": f"[INST] {prompt} [/INST]",
+            "temperature": 0.7,
+            "max_tokens": 1500
+        }
 
-        # Prepare prompt
-        prompt = self.prepare_analysis_prompt(song, lyrics_text, audio_features)
-
-        # Try OpenRouter (DeepSeek) first if enabled
-        analysis_result = None
-        if settings.USE_OPENROUTER:
-            logger.info(f"Analyzing song {song.id} with OpenRouter (DeepSeek)")
-            analysis_result = self.call_openrouter_api(prompt)
-
-        # If OpenRouter fails or is disabled, try Requesty.ai (Gemini 2.5 Pro) as fallback
-        if not analysis_result and settings.USE_REQUESTY and settings.REQUESTY_API_KEY:
-            logger.info(f"OpenRouter failed or disabled for song {song.id}, trying Requesty.ai (Gemini 2.5 Pro)")
-            analysis_result = self.call_requesty_gemini_api(prompt)
-
-        if not analysis_result:
-            logger.error(f"All LLM providers failed for song {song.id}")
-            return False
-
-        logger.info(f"Successfully analyzed song {song.id}")
-
-        # Validate and clean the analysis result
-        clean_result = self.validate_and_clean_analysis(analysis_result)
-
-        # Cache the result for 30 days
-        redis_cache.set(cache_key, clean_result, ttl_days=30)
-
-        # Save to database
-        return self.save_analysis(db, song, clean_result)
-
-    def validate_and_clean_analysis(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Validate and clean the analysis result
-
-        Args:
-            analysis: Raw analysis result from LLM
-
-        Returns:
-            Cleaned and validated analysis
-        """
-        clean_result = {}
-
-        # Convert string scores to floats where appropriate
-        for field in ['sentiment_score', 'lyric_complexity', 'uniqueness_score', 'underrated_score', 'quality_score']:
-            if field in analysis:
-                try:
-                    if isinstance(analysis[field], str):
-                        clean_result[field] = float(analysis[field])
-                    else:
-                        clean_result[field] = analysis[field]
-                except (ValueError, TypeError):
-                    # Default to middle value if conversion fails
-                    clean_result[field] = 0.5
-            else:
-                clean_result[field] = 0.5
-
-        # Ensure sentiment is one of expected values
-        if 'sentiment' in analysis:
-            sentiment = analysis['sentiment'].lower()
-            if sentiment in ['positive', 'negative', 'neutral']:
-                clean_result['sentiment'] = sentiment
-            else:
-                clean_result['sentiment'] = 'neutral'
-        else:
-            clean_result['sentiment'] = 'neutral'
-
-        # Copy string fields directly
-        for field in ['emotion', 'emotion_secondary', 'topic', 'description', 'target_audience']:
-            if field in analysis:
-                clean_result[field] = analysis[field]
-            else:
-                clean_result[field] = ""
-
-        # Handle list fields
-        for field in ['subtopics', 'stylistic_influences', 'lyrical_themes']:
-            if field in analysis and isinstance(analysis[field], list):
-                clean_result[field] = analysis[field]
-            else:
-                clean_result[field] = []
-
-        return clean_result
-
-    def save_analysis(self, db: Session, song: Song, analysis: Dict[str, Any]) -> bool:
-        """
-        Save LLM analysis to database
-
-        Args:
-            db: Database session
-            song: Song object
-            analysis: Analysis result
-
-        Returns:
-            True if saved successfully, False otherwise
-        """
         try:
-            # Prepare main fields
-            main_fields = {
-                'sentiment': analysis.get('sentiment', 'neutral'),
-                'emotion': analysis.get('emotion', ''),
-                'topic': analysis.get('topic', ''),
-                'lyric_complexity': analysis.get('lyric_complexity', 0.5),
-                'description': analysis.get('description', ''),
-                'uniqueness_score': analysis.get('uniqueness_score', 0.5),
-                'underrated_score': analysis.get('underrated_score', 0.5),
-                'quality_score': analysis.get('quality_score', 0.5),
-                'analyzed_at': datetime.utcnow()
-            }
+            logger.info(f"Calling Together API with model {self.provider_models['together']}")
+            response = requests.post(
+                "https://api.together.xyz/v1/completions",
+                headers=headers,
+                json=data,
+                timeout=60
+            )
 
-            # Handle additional fields from the expanded analysis
-            additional_fields = {}
-            if 'sentiment_score' in analysis:
-                additional_fields['sentiment_score'] = analysis['sentiment_score']
-            if 'emotion_secondary' in analysis:
-                additional_fields['emotion_secondary'] = analysis['emotion_secondary']
-            if 'subtopics' in analysis:
-                additional_fields['subtopics'] = json.dumps(analysis['subtopics'])
-            if 'target_audience' in analysis:
-                additional_fields['target_audience'] = analysis['target_audience']
-            if 'stylistic_influences' in analysis:
-                additional_fields['stylistic_influences'] = json.dumps(analysis['stylistic_influences'])
-            if 'lyrical_themes' in analysis:
-                additional_fields['lyrical_themes'] = json.dumps(analysis['lyrical_themes'])
+            if response.status_code != 200:
+                logger.error(f"Together API error: {response.status_code} {response.text}")
+                if response.status_code == 429:  # Rate limit
+                    logger.warning(f"Rate limit hit for Together. Disabling key temporarily.")
+                    api_key_manager.disable_key('together', api_key, 300)
+                return None
 
-            # Check if analysis already exists
-            existing_review = db.query(AIReview).filter(AIReview.song_id == song.id).first()
+            result = response.json()
+            content = result.get("choices", [{}])[0].get("text", "")
 
-            if existing_review:
-                # Update existing review
-                for key, value in main_fields.items():
-                    setattr(existing_review, key, value)
-
-                # Update additional fields if columns exist
-                for key, value in additional_fields.items():
-                    if hasattr(existing_review, key):
-                        setattr(existing_review, key, value)
-
-                db.add(existing_review)
-            else:
-                # Combine all fields
-                all_fields = {**main_fields, **additional_fields}
-
-                # Filter to only include fields that exist in the model
-                filtered_fields = {}
-                for key, value in all_fields.items():
-                    # This is a bit of a hack, but it works for now
-                    try:
-                        review = AIReview(song_id=song.id, **{key: value})
-                        filtered_fields[key] = value
-                    except TypeError:
-                        pass
-
-                # Create new review
-                review = AIReview(
-                    song_id=song.id,
-                    **filtered_fields
-                )
-
-                db.add(review)
-
-            db.commit()
-            return True
-
+            # Extract JSON from content
+            try:
+                # Try to find JSON in the response
+                json_start = content.find('[')
+                json_end = content.rfind(']') + 1
+                if json_start >= 0 and json_end > json_start:
+                    json_str = content[json_start:json_end]
+                    return json.loads(json_str)
+                return None
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse JSON from Together response: {content}")
+                return None
         except Exception as e:
-            logger.error(f"Error saving analysis for song {song.id}: {str(e)}")
-            db.rollback()
-            return False
+            logger.error(f"Error calling Together API: {str(e)}")
+            return None
 
-    def run(self, db: Session, limit: int = 20, batch_size: int = None) -> int:
+    def try_all_providers(self, prompt: str) -> Optional[List[Dict[str, Any]]]:
         """
-        Run AI analysis for songs without analysis
+        Try all providers in order of priority until one succeeds
+        Args:
+            prompt: Prompt to send to LLM
+        Returns:
+            Analysis results or None if all providers failed
+        """
+        for provider in self.provider_priority:
+            if provider == "openrouter":
+                result = self.call_openrouter_api(prompt)
+            elif provider == "requesty":
+                result = self.call_requesty_api(prompt)
+            elif provider == "together":
+                result = self.call_together_api(prompt)
+            else:
+                continue
 
+            if result:
+                logger.info(f"Successfully got results from {provider}")
+                return result
+
+        logger.error("All providers failed")
+        return None
+
+    def batch_analyze_songs(self, db: Session, song_ids: List[int], batch_size: int = 10) -> int:
+        """
+        Analyze a batch of songs
         Args:
             db: Database session
-            limit: Maximum number of songs to process
-            batch_size: Number of songs to process in each batch (defaults to settings.LLM_BATCH_SIZE)
-
+            song_ids: List of song IDs to analyze
+            batch_size: Number of songs per batch
         Returns:
             Number of songs successfully analyzed
         """
-        if batch_size is None:
-            batch_size = settings.LLM_BATCH_SIZE
-
-        logger.info(f"Starting LLM analysis for up to {limit} songs in batches of {batch_size}")
-
-        # Get songs without AI analysis
-        songs_query = db.query(Song).outerjoin(AIReview).filter(AIReview.id.is_(None))
-
-        # Process songs in batches
+        # Get songs with lyrics and audio features
         analyzed_count = 0
 
-        for batch_start in range(0, limit, batch_size):
-            songs_batch = songs_query.limit(batch_size).offset(batch_start).all()
-            if not songs_batch:
-                logger.info(f"No more songs to analyze after {analyzed_count} songs")
-                break
+        # Process in batches
+        for i in range(0, len(song_ids), batch_size):
+            batch_ids = song_ids[i:i + batch_size]
+            batch_songs = []
 
-            logger.info(f"Processing batch of {len(songs_batch)} songs (starting at offset {batch_start})")
+            # Prepare data for each song in batch
+            for song_id in batch_ids:
+                song = db.query(Song).filter(Song.id == song_id).first()
+                if not song:
+                    continue
 
-            for song in songs_batch:
-                try:
-                    success = self.analyze_song(db, song)
-                    if success:
-                        analyzed_count += 1
-                        logger.info(f"Successfully analyzed song {song.id}: {song.title} by {song.artist}")
-                    else:
-                        logger.warning(f"Failed to analyze song {song.id}: {song.title} by {song.artist}")
+                # Get lyrics if available
+                lyrics_obj = db.query(Lyrics).filter(Lyrics.song_id == song.id).first()
+                lyrics_text = lyrics_obj.excerpt if lyrics_obj else None
 
-                    # Sleep between API calls to respect rate limits
-                    time.sleep(2)
-                except Exception as e:
-                    logger.error(f"Error analyzing song {song.id}: {str(e)}")
+                # Get audio features if available
+                audio_features_obj = db.query(AudioFeature).filter(AudioFeature.song_id == song.id).first()
+                audio_features = None
+                if audio_features_obj:
+                    audio_features = {
+                        'tempo': audio_features_obj.tempo,
+                        'valence': audio_features_obj.valence,
+                        'energy': audio_features_obj.energy,
+                        'danceability': audio_features_obj.danceability
+                    }
 
-            logger.info(f"Completed batch. Analyzed {analyzed_count} songs so far")
+                # Add to batch
+                batch_songs.append({
+                    'id': song.id,
+                    'title': song.title,
+                    'artist': song.artist,
+                    'lyrics': lyrics_text,
+                    'audio_features': audio_features
+                })
 
-            # Sleep between batches
-            if batch_start + batch_size < limit:
-                logger.info(f"Sleeping for 5 seconds between batches")
-                time.sleep(5)
+            if not batch_songs:
+                continue
 
-        logger.info(f"LLM analysis run completed. Successfully analyzed {analyzed_count} songs")
+            # Prepare prompt for batch analysis
+            prompt = self.prepare_analysis_prompt(batch_songs)
+
+            # Try all providers
+            results = self.try_all_providers(prompt)
+            if not results:
+                logger.error(f"Failed to analyze batch {i // batch_size + 1}")
+                continue
+
+            # Save analyses to database
+            for result in results:
+                song_index = result.get('song_id', 0) - 1
+                if song_index < 0 or song_index >= len(batch_songs):
+                    continue
+                song_id = batch_songs[song_index]['id']
+
+                # Check if analysis already exists
+                existing_review = db.query(AIReview).filter(AIReview.song_id == song_id).first()
+                if existing_review:
+                    # Update existing review
+                    existing_review.sentiment = result.get('sentiment')
+                    existing_review.emotion = result.get('emotion')
+                    existing_review.topic = result.get('topic')
+                    existing_review.lyric_complexity = result.get('lyric_complexity')
+                    existing_review.description = result.get('description')
+                    existing_review.uniqueness_score = result.get('uniqueness_score')
+                    existing_review.underrated_score = result.get('underrated_score')
+                    existing_review.quality_score = result.get('quality_score')
+                    existing_review.analyzed_at = datetime.utcnow()
+                    db.add(existing_review)
+                else:
+                    # Create new review
+                    review = AIReview(
+                        song_id=song_id,
+                        sentiment=result.get('sentiment'),
+                        emotion=result.get('emotion'),
+                        topic=result.get('topic'),
+                        lyric_complexity=result.get('lyric_complexity'),
+                        description=result.get('description'),
+                        uniqueness_score=result.get('uniqueness_score'),
+                        underrated_score=result.get('underrated_score'),
+                        quality_score=result.get('quality_score'),
+                        analyzed_at=datetime.utcnow()
+                    )
+                    db.add(review)
+                analyzed_count += 1
+
+            db.commit()
+            logger.info(f"Analyzed batch {i // batch_size + 1}: {len(results)} songs")
+
+            # Sleep between batches to avoid rate limits
+            time.sleep(3)
+
         return analyzed_count
+
+    def run(self, db: Session, limit: int = 100, batch_size: int = 10) -> int:
+        """
+        Run AI analysis for songs without analysis
+        Args:
+            db: Database session
+            limit: Maximum number of songs to process
+            batch_size: Number of songs per batch
+        Returns:
+            Number of songs successfully analyzed
+        """
+        logger.info(f"Starting batch analysis of up to {limit} songs in batches of {batch_size}")
+
+        # Get songs without AI analysis
+        songs = db.query(Song).outerjoin(AIReview).filter(AIReview.id.is_(None)).limit(limit).all()
+        song_ids = [song.id for song in songs]
+
+        if not song_ids:
+            logger.info("No songs to analyze")
+            return 0
+
+        logger.info(f"Found {len(song_ids)} songs to analyze")
+
+        # Analyze in batches
+        return self.batch_analyze_songs(db, song_ids, batch_size)
 
 
 # Create singleton instance

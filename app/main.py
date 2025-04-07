@@ -1,9 +1,9 @@
 # app/main.py
+
 from fastapi import FastAPI, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime, timedelta
-
 from app.db.session import get_db
 from app.db.models import Song, AIReview, PopularityMetric, EngagementScore
 from app.collectors.reddit import reddit_collector
@@ -12,9 +12,12 @@ from app.enrichers.spotify import spotify_enricher
 from app.enrichers.lyrics import lyrics_fetcher
 from app.analysis.llm import llm_analyzer
 from app.scheduler.jobs import initialize_scheduler
-
 from pydantic import BaseModel
 from sqlalchemy import desc
+import logging
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 # Create FastAPI app
 app = FastAPI(
@@ -63,8 +66,15 @@ class SongDetail(SongBase):
 
 # Initialize scheduler
 @app.on_event("startup")
-def startup_event():
+async def startup_event():
+    # Initialize scheduler
     initialize_scheduler()
+
+    # Import artist queue to ensure worker thread starts
+    from app.collectors.artist_queue import worker_thread
+    logger.info("Artist catalog worker initialized")
+
+    # Other startup tasks...
 
 
 # API endpoints
@@ -260,6 +270,22 @@ def trigger_reddit_collection(db: Session = Depends(get_db)):
     return {"status": "success", "songs_added": len(new_songs)}
 
 
+@app.post("/admin/collect/artist_catalog/{artist_name}")
+def trigger_artist_catalog_collection(
+        artist_name: str,
+        spotify_id: str = None,
+        db: Session = Depends(get_db)
+):
+    """Manually trigger collection of an artist's catalog"""
+    from app.collectors.artist_catalog import artist_catalog_collector
+    try:
+        new_tracks = artist_catalog_collector.process_catalog(db, artist_name, spotify_id)
+        return {"status": "success", "new_tracks": new_tracks}
+    except Exception as e:
+        logger.error(f"Error collecting catalog for {artist_name}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/admin/collect/youtube/")
 def trigger_youtube_collection(db: Session = Depends(get_db)):
     """Manually trigger YouTube collection"""
@@ -281,4 +307,8 @@ def trigger_lyrics_fetching(db: Session = Depends(get_db)):
     return {"status": "success", "songs_processed": fetched_count}
 
 
-@app.post("/admin
+@app.post("/admin/analyze/llm/")
+def trigger_llm_analysis(db: Session = Depends(get_db)):
+    """Manually trigger LLM analysis"""
+    analyzed_count = llm_analyzer.run(db, limit=5, batch_size=5)
+    return {"status": "success", "songs_analyzed": analyzed_count}

@@ -7,14 +7,16 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from app.db.models import Song
 from app.core.utils import exponential_backoff_retry
+from app.collectors.base_collector import BaseCollector
 
 
-class BlogCollector:
+class BlogCollector(BaseCollector):
     def __init__(self):
         self.blog_urls = [
             "https://desihiphop.com/",
             # Add more blog URLs here
         ]
+
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
@@ -132,6 +134,10 @@ class BlogCollector:
                 db.commit()
                 db.refresh(song)
                 saved_songs.append(song)
+
+                # Add this line to trigger artist catalog collection
+                if artist != "Unknown":
+                    self.check_and_collect_artist_catalog(db, artist)
 
         return saved_songs
 

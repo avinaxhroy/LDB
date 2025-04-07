@@ -7,9 +7,10 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from app.db.models import Song
 from app.core.utils import exponential_backoff_retry
+from app.collectors.base_collector import BaseCollector
 
 
-class InstagramCollector:
+class InstagramCollector(BaseCollector):
     def __init__(self):
         self.instagram_profiles = [
             "dhhrohan", "desihiphop__", "dhhishere", "indianhiphop_",
@@ -17,10 +18,12 @@ class InstagramCollector:
             "hip_hop_hindustan", "we_hip_hoppin2", "indiemusic.in",
             "hip_hop_iindia12", "quote.hiphop", "_krsna_world"
         ]
+
         self.instagram_tags = [
             "desihiphop", "indianhiphop", "desi", "dhh", "gullyhiphop",
             "hindihiphop", "punjabirapper"
         ]
+
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
@@ -118,13 +121,16 @@ class InstagramCollector:
                 db.refresh(song)
                 saved_songs.append(song)
 
+                # Add this line to trigger artist catalog collection
+                if song_info['artist'] != 'Unknown':
+                    self.check_and_collect_artist_catalog(db, song_info['artist'])
+
         return saved_songs
 
     def run(self, db: Session) -> List[Song]:
         """
         Instagram scraping is complex and requires authentication.
         This is a placeholder for the actual implementation.
-
         In a production app, you would:
         1. Use Instagram's Graph API if you have access
         2. Or use a specialized Instagram scraping library
@@ -134,7 +140,6 @@ class InstagramCollector:
         """
         # This is a placeholder - in a real implementation, you would
         # use Instagram's API or a proper scraping solution
-
         dummy_song_data = [
             {'artist': 'Divine', 'title': 'Kaam 25'},
             {'artist': 'Prabh Deep', 'title': 'Classikh Maut'},

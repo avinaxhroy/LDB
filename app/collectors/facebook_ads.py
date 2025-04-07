@@ -6,9 +6,10 @@ from sqlalchemy.orm import Session
 from app.db.models import Song
 from app.core.config import settings
 from app.core.utils import exponential_backoff_retry
+from app.collectors.base_collector import BaseCollector
 
 
-class FacebookAdsCollector:
+class FacebookAdsCollector(BaseCollector):
     def __init__(self):
         self.access_token = settings.FACEBOOK_ACCESS_TOKEN
         self.base_url = "https://graph.facebook.com/v12.0"
@@ -136,6 +137,10 @@ class FacebookAdsCollector:
                 db.commit()
                 db.refresh(song)
                 saved_songs.append(song)
+
+                # Add this line to trigger artist catalog collection
+                if mention['artist'] != "Unknown":
+                    self.check_and_collect_artist_catalog(db, mention['artist'])
 
         return saved_songs
 
