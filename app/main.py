@@ -1,10 +1,10 @@
 # app/main.py
 
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime, timedelta
-from app.db.session import get_db
+from app.db.session import get_db, engine
 from app.db.models import Song, AIReview, PopularityMetric, EngagementScore
 from app.collectors.reddit import reddit_collector
 from app.collectors.youtube import youtube_collector
@@ -15,6 +15,9 @@ from app.scheduler.jobs import initialize_scheduler
 from pydantic import BaseModel
 from sqlalchemy import desc
 import logging
+from app.monitoring.telemetry import setup_telemetry
+from app.core.middleware import performance_middleware
+from app.monitoring.metrics import metrics_collector
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -25,6 +28,15 @@ app = FastAPI(
     description="Intelligent Music Database for Desi Hip-Hop Focus",
     version="1.0.0"
 )
+
+# Setup OpenTelemetry monitoring
+setup_telemetry(app, engine)
+
+
+# Add performance monitoring middleware
+@app.middleware("http")
+async def add_process_time_header(request: Request, call_next):
+    return await performance_middleware(request, call_next)
 
 
 # Define Pydantic models for API responses
@@ -74,7 +86,9 @@ async def startup_event():
     from app.collectors.artist_queue import worker_thread
     logger.info("Artist catalog worker initialized")
 
-    # Other startup tasks...
+    # Start metrics collector
+    metrics_collector.start()
+    logger.info("System metrics collector started")
 
 
 # API endpoints
@@ -278,6 +292,7 @@ def trigger_artist_catalog_collection(
 ):
     """Manually trigger collection of an artist's catalog"""
     from app.collectors.artist_catalog import artist_catalog_collector
+
     try:
         new_tracks = artist_catalog_collector.process_catalog(db, artist_name, spotify_id)
         return {"status": "success", "new_tracks": new_tracks}
