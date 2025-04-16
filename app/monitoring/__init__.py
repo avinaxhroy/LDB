@@ -7,8 +7,10 @@ from app.monitoring.core import setup_monitoring, monitoring
 from app.monitoring.system_metrics import SystemMetricsCollector
 from app.monitoring.database_monitor import DatabaseMonitor
 from app.monitoring.application_metrics import ApplicationMetrics
-from app.monitoring.tracing import setup_tracing
-from app.monitoring.health_checks import HealthCheckService
+from app.monitoring.telemetry import setup_telemetry
+from app.monitoring.tracing import setup_tracing, trace_function
+from app.monitoring.health_checks import HealthCheckService, setup_health_checks
+from app.monitoring.metrics import metrics_collector
 
 __all__ = [
     'setup_monitoring',
@@ -16,6 +18,10 @@ __all__ = [
     'SystemMetricsCollector',
     'DatabaseMonitor',
     'ApplicationMetrics',
+    'setup_telemetry',
     'setup_tracing',
+    'trace_function',
     'HealthCheckService',
+    'setup_health_checks',
+    'metrics_collector',
 ]

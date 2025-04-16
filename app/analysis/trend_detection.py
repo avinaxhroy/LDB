@@ -19,7 +19,7 @@ class TrendDetector:
             'comments': 3.0,
             'shares': 4.0,
             'spotify_popularity': 2.5
-        }  # Added closing brace
+        }
         self.time_decay_factor = 0.95  # Higher values favor newer content
 
     def calculate_engagement_score(self, db: Session, days: int = 30) -> List[Dict[str, Any]]:
@@ -71,7 +71,7 @@ class TrendDetector:
             latest_metrics["comments"] * self.popularity_weights["comments"] +
             latest_metrics["spotify_plays"] * self.popularity_weights["views"] / 1000 +
             latest_metrics["spotify_saves"] * self.popularity_weights["likes"]
-        )  # Added closing parenthesis
+        )
 
         # Apply time decay
         latest_metrics["time_factor"] = np.exp(-0.05 * latest_metrics["days_since_release"])
@@ -129,7 +129,7 @@ class TrendDetector:
                 continue
 
             # Calculate growth rate
-            earliest = metrics[0]  # Fixed: access first element of metrics
+            earliest = metrics[0]
             latest = metrics[-1]
 
             # Calculate total engagement for earliest and latest
@@ -139,7 +139,7 @@ class TrendDetector:
                 earliest.youtube_comments * 3 +
                 earliest.spotify_plays / 1000 +
                 earliest.spotify_saves * 2
-            )  # Added closing parenthesis
+            )
 
             latest_engagement = (
                 latest.youtube_views / 1000 +
@@ -147,7 +147,7 @@ class TrendDetector:
                 latest.youtube_comments * 3 +
                 latest.spotify_plays / 1000 +
                 latest.spotify_saves * 2
-            )  # Added closing parenthesis
+            )
 
             # Calculate growth rate
             days_diff = (latest.recorded_at - earliest.recorded_at).days

@@ -1,115 +1,121 @@
 # app/monitoring/tracing.py
 import logging
+import os
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# Global tracer instance
+_tracer = None
 
-def setup_tracing(app: Any, engine: Optional[Any] = None):
-    """Configure OpenTelemetry tracing with advanced options"""
+
+def setup_tracing(app=None, db_engine=None):
+    """
+    Set up distributed tracing
+    
+    Args:
+        app: The FastAPI or Flask application
+        db_engine: SQLAlchemy engine for database tracing
+        
+    Returns:
+        Tracer object
+    """
+    global _tracer
+    
     try:
-        # Import OpenTelemetry components
+        # Try to use OpenTelemetry if available
         from opentelemetry import trace
         from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
-        from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.sdk.resources import Resource
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-
-        # Framework-specific instrumentors
-        try:
-            from opentelemetry.instrumentation.flask import FlaskInstrumentor
-            flask_available = True
-        except ImportError:
-            flask_available = False
-
-        try:
-            from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-            fastapi_available = True
-        except ImportError:
-            fastapi_available = False
-
-        # Database instrumentation
-        try:
-            from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
-            sqlalchemy_available = True
-        except ImportError:
-            sqlalchemy_available = False
-
-        # Redis instrumentation
-        try:
-            from opentelemetry.instrumentation.redis import RedisInstrumentor
-            redis_available = True
-        except ImportError:
-            redis_available = False
-
-        # HTTP client instrumentation
-        try:
-            from opentelemetry.instrumentation.requests import RequestsInstrumentor
-            requests_available = True
-        except ImportError:
-            requests_available = False
-
-        # Set up resource with detailed service info
-        service_name = getattr(app, 'title', 'desi-hiphop-recommendation')
-        resource = Resource.create({
-            SERVICE_NAME: service_name,
-            "service.version": getattr(app, 'version', '1.0.0'),
-            "deployment.environment": "production"
-        })
-
-        # Create a tracer provider
+        
+        # Get service name from environment or use default
+        service_name = os.getenv("MONITORING_SERVICE_NAME", "desi-hiphop-recommendation")
+        
+        # Create resource
+        resource = Resource.create({"service.name": service_name})
+        
+        # Create tracer provider
         tracer_provider = TracerProvider(resource=resource)
-
-        # Add console exporter for development visibility
-        console_processor = BatchSpanProcessor(ConsoleSpanExporter())
-        tracer_provider.add_span_processor(console_processor)
-
-        # Add OTLP exporter for production systems that support it
-        try:
-            otlp_exporter = OTLPSpanExporter(endpoint="http://localhost:4317")
-            otlp_processor = BatchSpanProcessor(otlp_exporter)
-            tracer_provider.add_span_processor(otlp_processor)
-            logger.info("OTLP exporter configured successfully")
-        except Exception as e:
-            logger.warning(f"OTLP exporter not configured: {str(e)}")
-
-        # Set the global tracer provider
         trace.set_tracer_provider(tracer_provider)
-
-        # Instrument web framework based on type
-        framework_module = app.__class__.__module__.split('.')[0]
-
-        if framework_module == 'flask' and flask_available:
-            logger.info("Instrumenting Flask application")
-            FlaskInstrumentor().instrument_app(app)
-        elif framework_module == 'fastapi' and fastapi_available:
-            logger.info("Instrumenting FastAPI application")
-            FastAPIInstrumentor.instrument_app(app)
-        else:
-            logger.warning(f"No instrumentation available for framework: {framework_module}")
-
-        # Instrument SQLAlchemy if engine is provided
-        if engine and sqlalchemy_available:
-            logger.info("Instrumenting SQLAlchemy")
-            SQLAlchemyInstrumentor().instrument(engine=engine)
-
-        # Instrument Redis client if available
-        if redis_available:
-            logger.info("Instrumenting Redis client")
-            RedisInstrumentor().instrument()
-
-        # Instrument HTTP client if available
-        if requests_available:
-            logger.info("Instrumenting Requests client")
-            RequestsInstrumentor().instrument()
-
-        logger.info("Tracing setup complete")
-        return tracer_provider
-
-    except ImportError as e:
-        logger.warning(f"OpenTelemetry setup failed due to missing dependencies: {str(e)}")
-        logger.warning("Install opentelemetry-api, opentelemetry-sdk and instrumentation packages")
-        return None
+        
+        # Set up exporter if OTLP endpoint is configured
+        otlp_endpoint = os.getenv("OTLP_ENDPOINT")
+        if otlp_endpoint:
+            otlp_exporter = OTLPSpanExporter(endpoint=otlp_endpoint)
+            span_processor = BatchSpanProcessor(otlp_exporter)
+            tracer_provider.add_span_processor(span_processor)
+            logger.info(f"OpenTelemetry tracing configured with OTLP exporter to {otlp_endpoint}")
+        
+        # Create tracer
+        _tracer = trace.get_tracer(__name__)
+        
+        # Instrument FastAPI if available
+        if app and "fastapi" in str(type(app)):
+            try:
+                from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+                FastAPIInstrumentor.instrument_app(app)
+                logger.info("FastAPI instrumented for tracing")
+            except ImportError:
+                logger.warning("OpenTelemetry FastAPI instrumentation not available")
+        
+        # Instrument Flask if available
+        elif app and "flask" in str(type(app)):
+            try:
+                from opentelemetry.instrumentation.flask import FlaskInstrumentor
+                FlaskInstrumentor.instrument_app(app)
+                logger.info("Flask instrumented for tracing")
+            except ImportError:
+                logger.warning("OpenTelemetry Flask instrumentation not available")
+        
+        # Instrument SQLAlchemy if available
+        if db_engine:
+            try:
+                from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+                SQLAlchemyInstrumentor.instrument(engine=db_engine)
+                logger.info("SQLAlchemy instrumented for tracing")
+            except ImportError:
+                logger.warning("OpenTelemetry SQLAlchemy instrumentation not available")
+        
+        logger.info("Distributed tracing initialized")
+        return _tracer
+    
+    except ImportError:
+        logger.warning("OpenTelemetry not installed. Tracing disabled. Install with: pip install opentelemetry-api opentelemetry-sdk")
+        
+        # Return dummy tracer that does nothing
+        class DummyTracer:
+            def start_as_current_span(self, name, *args, **kwargs):
+                class DummySpan:
+                    def __enter__(self): return self
+                    def __exit__(self, *args, **kwargs): pass
+                    def add_event(self, *args, **kwargs): pass
+                    def set_attribute(self, *args, **kwargs): pass
+                    def set_attributes(self, *args, **kwargs): pass
+                return DummySpan()
+            
+            def start_span(self, *args, **kwargs):
+                return self.start_as_current_span(*args, **kwargs)
+        
+        _tracer = DummyTracer()
+        return _tracer
     except Exception as e:
-        logger.error(f"Failed to set up tracing: {str(e)}")
+        logger.error(f"Error setting up tracing: {str(e)}")
         return None
+
+
+def get_tracer():
+    """Get the global tracer instance"""
+    if _tracer is None:
+        return setup_tracing()
+    return _tracer
+
+
+def trace_function(func):
+    """Decorator to trace a function"""
+    def wrapper(*args, **kwargs):
+        tracer = get_tracer()
+        with tracer.start_as_current_span(func.__name__):
+            return func(*args, **kwargs)
+    return wrapper

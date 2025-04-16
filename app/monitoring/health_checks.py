@@ -48,8 +48,15 @@ class HealthCheckService:
         """Register a HTTP endpoint health check"""
         try:
             import requests
+            from urllib.parse import urlparse
         except ImportError:
             logger.warning("Could not import 'requests' library. Install it to use HTTP health checks.")
+            return
+
+        # Validate URL format
+        parsed_url = urlparse(url)
+        if not parsed_url.scheme or not parsed_url.netloc:
+            logger.warning(f"Invalid URL format for health check: {url}")
             return
 
         def check_func():

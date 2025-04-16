@@ -19,6 +19,8 @@ import time
 import os
 import psutil
 import json
+import asyncio
+import sys
 
 # Import enhanced monitoring components
 from app.monitoring.core import setup_monitoring, monitoring
@@ -29,10 +31,23 @@ from app.monitoring.system_metrics import SystemMetricsCollector
 from app.core.middleware import performance_middleware
 
 # Set up logging
+log_file = os.environ.get("LOG_FILE", "app.log")
+log_level = os.environ.get("LOG_LEVEL", "INFO")
+
+# Configure handlers for both file and console output
+handlers = [
+    logging.StreamHandler(sys.stdout),
+]
+
+# Only add file handler if LOG_FILE environment variable is set
+if log_file != "":
+    handlers.append(logging.FileHandler(log_file))
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, log_level),
     format="%(asctime)s | %(levelname)s | %(module)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=handlers
 )
 logger = logging.getLogger(__name__)
 

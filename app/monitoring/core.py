@@ -116,6 +116,7 @@ def setup_monitoring(app=None, db_engine=None):
     from app.monitoring.tracing import setup_tracing
     from app.monitoring.health_checks import HealthCheckService
     from app.monitoring.exporters.console import ConsoleExporter
+    from app.monitoring.application_metrics import ApplicationMetrics
 
     # Register system metrics collector
     system_metrics = SystemMetricsCollector(interval=monitoring.config.metric_interval)
@@ -125,6 +126,10 @@ def setup_monitoring(app=None, db_engine=None):
     if db_engine:
         db_monitor = DatabaseMonitor(db_engine, interval=monitoring.config.metric_interval)
         monitoring.register_component("database", db_monitor)
+
+    # Setup application metrics
+    app_metrics = ApplicationMetrics(app=app)
+    monitoring.register_component("application", app_metrics)
 
     # Setup application monitoring if app is provided
     if app:

@@ -37,8 +37,31 @@ class ConsoleExporter:
         """Periodically export metrics"""
         while self.running:
             try:
-                # In a real implementation, we would get metrics from
-                # the global monitoring registry here
+                # Import here to avoid circular imports
+                from app.monitoring.core import monitoring
+                
+                # Get all metrics from the monitoring components
+                metrics_data = {}
+                
+                # Collect system metrics
+                system_metrics = monitoring.components.get("system_metrics")
+                if system_metrics:
+                    metrics_data["system"] = system_metrics.get_current_metrics()
+                
+                # Collect database metrics
+                db_monitor = monitoring.components.get("database")
+                if db_monitor:
+                    metrics_data["database"] = db_monitor.get_current_metrics()
+                
+                # Collect application metrics
+                app_metrics = monitoring.components.get("application")
+                if app_metrics:
+                    metrics_data["application"] = app_metrics.get_metrics()
+                
+                # Export the collected metrics
+                if metrics_data:
+                    self.export_metrics(metrics_data)
+                
                 time.sleep(self.interval)
             except Exception as e:
                 logger.error(f"Error exporting metrics: {str(e)}")

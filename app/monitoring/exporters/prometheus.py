@@ -61,13 +61,72 @@ class PrometheusExporter:
         for name, metric_data in metrics.items():
             metric_type = metric_data["type"]
             description = metric_data["description"]
+            values = metric_data["values"]
 
             if metric_type == "counter":
                 # Create Counter
-                pass
+                try:
+                    counter = self.Counter(name, description, list(next(iter(values.values())).keys()) if values else [])
+                    for label_key, value in values.items():
+                        # Parse label string back into a dict
+                        label_dict = self._parse_label_string(label_key)
+                        counter.labels(**label_dict).inc(value)
+                except Exception as e:
+                    logger.error(f"Failed to create Prometheus counter {name}: {str(e)}")
+
             elif metric_type == "gauge":
                 # Create Gauge
-                pass
+                try:
+                    gauge = self.Gauge(name, description, list(next(iter(values.values())).keys()) if values else [])
+                    for label_key, value in values.items():
+                        # Parse label string back into a dict
+                        label_dict = self._parse_label_string(label_key)
+                        gauge.labels(**label_dict).set(value)
+                except Exception as e:
+                    logger.error(f"Failed to create Prometheus gauge {name}: {str(e)}")
+
             elif metric_type == "histogram":
                 # Create Histogram
-                pass
+                try:
+                    # Extract bucket values from first histogram entry
+                    first_value = next(iter(values.values())) if values else {}
+                    buckets = list(first_value.get("buckets", {}).keys())
+                    
+                    histogram = self.Histogram(name, description, 
+                                              list(next(iter(values.values())).keys()) if values else [],
+                                              buckets=buckets)
+                                              
+                    for label_key, histogram_data in values.items():
+                        # Parse label string back into a dict
+                        label_dict = self._parse_label_string(label_key)
+                        
+                        # We can't directly set histogram values, but we can observe values
+                        # with appropriate weights to recreate the histogram
+                        for bucket, count in histogram_data.get("buckets", {}).items():
+                            if count > 0:
+                                histogram.labels(**label_dict).observe(float(bucket), count)
+                except Exception as e:
+                    logger.error(f"Failed to create Prometheus histogram {name}: {str(e)}")
+
+        logger.info(f"Registered {len(metrics)} metrics with Prometheus exporter")
+
+    def _parse_label_string(self, label_str):
+        """Parse a label string back into a dictionary of label values"""
+        if label_str == "default":
+            return {}
+            
+        # Convert string representation of tuple list back to dict
+        try:
+            # Remove leading/trailing brackets and split by comma
+            # Format is typically like: "[('method', 'GET'), ('endpoint', '/api')]"
+            clean_str = label_str.strip("[]")
+            if not clean_str:
+                return {}
+                
+            # Parse tuples
+            import ast
+            tuple_list = ast.literal_eval(f"[{clean_str}]")
+            return dict(tuple_list)
+        except Exception as e:
+            logger.error(f"Failed to parse label string '{label_str}': {str(e)}")
+            return {}

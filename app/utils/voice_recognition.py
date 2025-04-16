@@ -350,8 +350,8 @@ class VoiceFingerprinter:
                     # Clean up temp file
                     try:
                         os.remove(audio_path)
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Failed to remove temp file {audio_path}: {str(e)}")
                     continue
 
                 # Save fingerprint
@@ -366,8 +366,8 @@ class VoiceFingerprinter:
                     # Clean up temp file
                     try:
                         os.remove(audio_path)
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Failed to remove temp file {audio_path}: {str(e)}")
                     continue
 
                 results["success"] += 1
@@ -379,16 +379,23 @@ class VoiceFingerprinter:
                 # Clean up temp file
                 try:
                     os.remove(audio_path)
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to remove temp file {audio_path}: {str(e)}")
 
             except Exception as e:
+                logger.error(f"Error processing artist {artist_id}: {str(e)}")
                 results["failed"] += 1
                 results["details"].append({
                     "artist_id": artist_id,
                     "success": False,
                     "error": str(e)
                 })
+                # Attempt cleanup in case of error
+                try:
+                    if 'audio_path' in locals():
+                        os.remove(audio_path)
+                except Exception:
+                    pass
 
         return results
 
