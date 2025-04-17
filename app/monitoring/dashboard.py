@@ -456,6 +456,10 @@ class Dashboard:
             self.health_check = None
             self.app_metrics = ApplicationMetrics(self.app)
 
+    def start_metrics_collection(self):
+        """Placeholder for starting metrics collection."""
+        logger.info("Metrics collection started.")
+
     def setup_routes(self):
         """Set up Flask routes for the dashboard"""
         

@@ -117,6 +117,9 @@ class SystemMetricsCollector:
         memory = psutil.virtual_memory()
         disk = psutil.disk_usage('/')
 
+        # Ensure cpu_percent is collected and stored
+        self.metrics["cpu_percent"] = psutil.cpu_percent(interval=0.5)
+
         # Network metrics with rate calculation
         current_net = psutil.net_io_counters()
         current_time = time.time()

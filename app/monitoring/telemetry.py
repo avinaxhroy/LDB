@@ -27,7 +27,7 @@ def setup_telemetry(app, engine=None):
     # Instrument FastAPI
     FastAPIInstrumentor.instrument_app(app)
 
-    # Instrument SQLAlchemy if engine is provided
+    # Ensure proper initialization of SQLAlchemyInstrumentor
     if engine:
         SQLAlchemyInstrumentor().instrument(engine=engine)
 

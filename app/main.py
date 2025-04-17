@@ -29,6 +29,7 @@ from app.monitoring.database_monitor import DatabaseMonitor
 from app.monitoring.health_checks import HealthCheckService
 from app.monitoring.system_metrics import SystemMetricsCollector
 from app.core.middleware import performance_middleware
+from app.enrichers.spotify_auth import spotify_auth
 
 # Set up logging
 log_file = os.environ.get("LOG_FILE", "app.log")
@@ -145,7 +146,8 @@ async def startup_event():
         health_check.register_http_endpoint(
             "spotify_api",
             "https://api.spotify.com/v1/status",
-            expected_status=200
+            expected_status=200,
+            headers=spotify_auth.get_headers()
         )
 
     # Initialize scheduler
