@@ -29,7 +29,7 @@ from app.monitoring.database_monitor import DatabaseMonitor
 from app.monitoring.health_checks import HealthCheckService
 from app.monitoring.system_metrics import SystemMetricsCollector
 from app.core.middleware import performance_middleware
-from app.enrichers.spotify_auth import spotify_auth
+from app.utils.spotify_auth import spotify_auth
 
 # Set up logging
 log_file = os.environ.get("LOG_FILE", "app.log")
