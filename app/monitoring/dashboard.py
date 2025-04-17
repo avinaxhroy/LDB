@@ -109,43 +109,33 @@ class DashboardConfig:
     
     # Dynamic configuration
     def __init__(self):
+        # Removed Windows-specific paths and ensured compatibility with Linux
         self.log_paths = [
             '/var/log/ldb/out.log',
             '/var/log/ldb/err.log',
             '/var/log/ldb/dashboard_out.log',
             '/var/log/ldb/dashboard_err.log'
         ]
-        
-        # Add Windows log paths as fallback
-        if platform.system() == 'Windows':
-            win_log_dir = os.path.join('d:', os.sep, 'ldb', 'logs')
-            if not os.path.exists(win_log_dir):
-                os.makedirs(win_log_dir, exist_ok=True)
-            self.log_paths.extend([
-                os.path.join(win_log_dir, 'out.log'),
-                os.path.join(win_log_dir, 'err.log'),
-                os.path.join(win_log_dir, 'dashboard_out.log'),
-                os.path.join(win_log_dir, 'dashboard_err.log')
-            ])
-        
-        # Service configurations
+
+        # Removed fallback for Windows log paths as this is a Linux VPS
+        # Service configurations remain unchanged
         self.supervisor_services = ['ldb', 'ldb_dashboard']
         self.system_services = ['postgresql', 'nginx', 'redis-server', 'supervisor']
-        
-        # Database configuration
+
+        # Database configuration remains unchanged
         self.database_url = self._get_database_url()
-        
-        # Application info
+
+        # Application info updated for Linux environment
         self.app_name = os.getenv("APP_NAME", "Desi Hip-Hop Recommendation System")
         self.app_version = os.getenv("APP_VERSION", "1.0.0")
-        self.app_dir = os.getenv("APP_DIR", "d:\\ldb" if platform.system() == 'Windows' else "/var/www/ldb")
-        
-        # Network configuration
+        self.app_dir = os.getenv("APP_DIR", "/var/www/ldb")
+
+        # Network configuration remains unchanged
         self.bind_host = os.getenv("DASHBOARD_HOST", "0.0.0.0")
         self.bind_port = int(os.getenv("DASHBOARD_PORT", "8001"))
         self.allow_external = os.getenv("DASHBOARD_ALLOW_EXTERNAL", "true").lower() in ("true", "yes", "1")
-        
-        # CORS settings
+
+        # CORS settings remain unchanged
         self.cors_origins = os.getenv("DASHBOARD_CORS_ORIGINS", "*")
         
     def _get_database_url(self) -> str:
@@ -160,13 +150,7 @@ class DashboardConfig:
             db_port = os.getenv("POSTGRES_PORT", "5432")
             db_name = os.getenv("POSTGRES_DB", "music_db")
             
-            # Check if we're on Windows for SQLite fallback
-            if platform.system() == 'Windows' and not db_password:
-                logger.info("On Windows without DB password, using SQLite as fallback")
-                sqlite_path = os.path.join('d:', os.sep, 'ldb', 'data', 'music.db')
-                return f"sqlite:///{sqlite_path}"
-            else:
-                return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+            return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
         return db_url
 
 
