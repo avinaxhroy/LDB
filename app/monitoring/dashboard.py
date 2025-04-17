@@ -1,2144 +1,632 @@
-#!/usr/bin/env python3
-"""
-Enhanced Monitoring Dashboard for LDB (Desi Hip-Hop Recommendation System)
-
-This dashboard provides a comprehensive view of system health and performance:
-- System metrics (CPU, memory, disk usage)
-- Service status monitoring and management
-- Database metrics and performance analytics
-- Log collection and error tracking
-- Debug session management and troubleshooting
-- Network diagnostics and connectivity testing
-- Application performance telemetry
-
-Usage:
-  python -m app.monitoring.dashboard [--host HOST] [--port PORT] [--debug]
-"""
 import os
-import sys
 import time
-import json
-import re
+import psutil
 import logging
 import threading
-import subprocess
-import platform
+import datetime
+from flask import Flask, render_template, jsonify, request
+import matplotlib.pyplot as plt
+import pandas as pd
+from io import BytesIO
+import base64
+import json
+import sqlite3
 import socket
-import tempfile
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Union, Callable
-from collections import defaultdict
-from functools import wraps
+import requests
 
-# Add the app directory to the PYTHONPATH
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
-
-# Configure logging first
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("e:\\LDB\\logs\\dashboard.log"),
+        logging.StreamHandler()
+    ]
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("LDB-Dashboard")
 
-
-class DependencyManager:
-    """Manages dependencies required for the dashboard"""
-    
-    @staticmethod
-    def check_and_install(package_name: str) -> bool:
-        """Check if a package is installed and install if needed"""
-        try:
-            __import__(package_name.replace("-", "_"))
-            return True
-        except ImportError:
-            logger.info(f"{package_name} not found. Installing...")
-            try:
-                # Check if we're in a virtualenv to avoid using --user flag
-                in_virtualenv = hasattr(sys, 'real_prefix') or (
-                    hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix
-                )
-                
-                if in_virtualenv:
-                    # In virtualenv, don't use --user
-                    subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
-                    return True
-                else:
-                    # Try installing with user flag first
-                    try:
-                        subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", package_name])
-                        return True
-                    except subprocess.CalledProcessError:
-                        # If that fails, try without the --user flag
-                        subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
-                        return True
-            except Exception as e:
-                logger.error(f"Error installing {package_name}: {e}")
-                logger.warning(f"Please install {package_name} manually if needed")
-                return False
-
-
-# Install required dependencies
-required_packages = [
-    "flask", "sqlalchemy", "psutil", "python-dotenv", 
-    "prometheus_client", "uvicorn", "gunicorn", "flask-cors"  # Added flask-cors for CORS support
-]
-for package in required_packages:
-    DependencyManager.check_and_install(package)
-
-# Now import the required packages
-try:
-    import psutil
-    from flask import Flask, render_template_string, jsonify, request, Response
-    from sqlalchemy import create_engine, text
-    from dotenv import load_dotenv
-    
-    # Import pre-made monitoring modules
-    from app.monitoring.core import monitoring, setup_monitoring
-    from app.monitoring.database_monitor import DatabaseMonitor
-    from app.monitoring.system_metrics import SystemMetricsCollector
-    from app.monitoring.health_checks import HealthCheckService
-    from app.monitoring.application_metrics import ApplicationMetrics
-    from flask_cors import CORS
-except ImportError as e:
-    logger.critical(f"Critical import error: {e}")
-    logger.critical("Cannot continue without required packages or monitoring modules")
-    sys.exit(1)
-
-# Load environment variables
-load_dotenv()
-
-
-class DashboardConfig:
-    """Configuration for the dashboard"""
-    # Constants
-    MAX_LOGS = 200
-    
-    # Dynamic configuration
-    def __init__(self):
-        # Add support for both Linux and Windows log paths
-        self.log_paths = []
+class LDBDashboard:
+    def __init__(self, update_interval=5, config_file=None):
+        """
+        Initialize the LDB monitoring dashboard
         
-        # Linux default log paths
-        linux_log_paths = [
-            '/var/log/ldb/out.log',
-            '/var/log/ldb/err.log',
-            '/var/log/ldb/dashboard_out.log',
-            '/var/log/ldb/dashboard_err.log'
-        ]
-        
-        # Windows default log paths (using current dir or temp dir)
-        windows_log_paths = [
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'logs', 'app.log'),
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'logs', 'error.log'),
-            os.path.join(tempfile.gettempdir(), 'ldb_app.log'),
-            os.path.join(tempfile.gettempdir(), 'ldb_error.log')
-        ]
-        
-        # Set appropriate paths based on platform
-        if platform.system() == 'Windows':
-            self.log_paths = windows_log_paths
-        else:
-            self.log_paths = linux_log_paths
-
-        # Add any application logs from environment variables if available
-        env_log_path = os.getenv("APP_LOG_PATH")
-        if env_log_path:
-            self.log_paths.append(env_log_path)
-        
-        # Add the current Python console log as a fallback
-        try:
-            import logging.handlers
-            for handler in logging.getLogger().handlers:
-                if isinstance(handler, logging.handlers.RotatingFileHandler) or isinstance(handler, logging.FileHandler):
-                    if handler.baseFilename:
-                        self.log_paths.append(handler.baseFilename)
-        except Exception:
-            pass
-
-        # Service configurations
-        self.supervisor_services = ['ldb', 'ldb_dashboard']
-        self.system_services = ['postgresql', 'nginx', 'redis-server', 'supervisor']
-
-        # Database configuration
-        self.database_url = self._get_database_url()
-
-        # Application info
-        self.app_name = os.getenv("APP_NAME", "Desi Hip-Hop Recommendation System")
-        self.app_version = os.getenv("APP_VERSION", "1.0.0")
-        self.app_dir = os.getenv("APP_DIR", "/var/www/ldb" if platform.system() != 'Windows' else os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-
-        # Network configuration
-        self.bind_host = os.getenv("DASHBOARD_HOST", "0.0.0.0")
-        self.bind_port = int(os.getenv("DASHBOARD_PORT", "8001"))
-        self.allow_external = os.getenv("DASHBOARD_ALLOW_EXTERNAL", "true").lower() in ("true", "yes", "1")
-
-        # CORS settings
-        self.cors_origins = os.getenv("DASHBOARD_CORS_ORIGINS", "*")
-        
-    def _get_database_url(self) -> str:
-        """Get database URL from environment variables or construct default"""
-        db_url = os.getenv("DATABASE_URL")
-        if not db_url:
-            logger.warning("DATABASE_URL not found in .env file, using default configuration")
-            # Construct from individual parts if available
-            db_user = os.getenv("POSTGRES_USER", "ldb_user")
-            db_password = os.getenv("POSTGRES_PASSWORD", "")
-            db_host = os.getenv("POSTGRES_HOST", "localhost")
-            db_port = os.getenv("POSTGRES_PORT", "5432")
-            db_name = os.getenv("POSTGRES_DB", "music_db")
-            
-            return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-        return db_url
-
-
-class SystemInformation:
-    """System information collector"""
-    
-    def __init__(self):
-        """Initialize system information"""
-        self.info = {
-            "hostname": socket.gethostname(),
-            "platform": platform.platform(),
-            "python_version": platform.python_version(),
-            "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "ip_address": self._get_ip_address(),
-            "network_interfaces": self._get_network_interfaces(),
+        Args:
+            update_interval (int): Interval in seconds for metrics collection
+            config_file (str): Path to configuration file
+        """
+        self.update_interval = update_interval
+        self.metrics = {
+            'cpu_usage': [],
+            'memory_usage': [],
+            'disk_usage': [],
+            'network_traffic': [],
+            'active_connections': [],
+            'request_count': 0,
+            'error_count': 0,
+            'response_times': [],
+            'timestamp': [],
+            'db_query_times': [],
+            'db_transaction_count': 0,
+            'custom_events': [],
+            'health_check_status': {},
+            'api_call_count': {},
+            'process_memory': []
         }
-    
-    def _get_ip_address(self) -> str:
-        """Get server's IP address using several fallback methods"""
-        try:
-            # Try standard hostname resolution
-            return socket.gethostbyname(socket.gethostname())
-        except:
-            try:
-                # Alternative method via UDP socket
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("8.8.8.8", 80))
-                ip = s.getsockname()[0]
-                s.close()
-                return ip
-            except:
-                # Last resort fallback
-                return "127.0.0.1"
-    
-    def _get_network_interfaces(self) -> dict:
-        """Get all network interfaces and their IP addresses"""
-        interfaces = {}
-        try:
-            for interface, addrs in psutil.net_if_addrs().items():
-                interfaces[interface] = []
-                for addr in addrs:
-                    if addr.family == socket.AF_INET:  # IPv4
-                        interfaces[interface].append({
-                            "address": addr.address,
-                            "netmask": addr.netmask,
-                            "broadcast": getattr(addr, "broadcast", None),
-                        })
-        except Exception as e:
-            logger.error(f"Error getting network interfaces: {e}")
-        
-        return interfaces
-    
-    def get_info(self) -> Dict[str, str]:
-        """Get system information dictionary"""
-        return self.info.copy()
-
-
-class LogCollector:
-    """Collects and processes logs from various sources"""
-    
-    def __init__(self, config: DashboardConfig):
-        self.config = config
-        self.live_logs = []
-        self.application_errors = []
-        # Collect logs immediately on initialization
-        self.collect_logs()
-    
-    def collect_logs(self):
-        """Collect logs from configured log files"""
-        try:
-            collected_logs = []
-            
-            # Check if log paths exist and are accessible
-            log_paths_checked = []
-            for log_path in self.config.log_paths:
-                if os.path.exists(log_path):
-                    try:
-                        with open(log_path, 'r', errors='replace') as f:
-                            # Read the last 50 lines
-                            lines = f.readlines()[-50:]
-                            collected_logs.extend([line.strip() for line in lines])
-                        log_paths_checked.append(f"{log_path} (found)")
-                    except Exception as e:
-                        logger.error(f"Error reading log file {log_path}: {str(e)}")
-                        log_paths_checked.append(f"{log_path} (error: {str(e)})")
-                else:
-                    log_paths_checked.append(f"{log_path} (not found)")
-            
-            # If no logs were found, add a fallback message with info on paths checked
-            if not collected_logs:
-                logger.warning(f"No log files found or accessible. Paths checked: {', '.join(log_paths_checked)}")
-                # Add current console output as fallback
-                collected_logs.append(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | INFO | No log files found, displaying console output")
-                # Get logs from current process if available
-                if hasattr(logging, 'getLogRecordFactory'):
-                    for handler in logging.getLogger().handlers:
-                        if isinstance(handler, logging.StreamHandler):
-                            collected_logs.append(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | INFO | Current process logs available")
-            
-            # Sort logs by timestamp if they have one
-            if collected_logs:
-                # Simple timestamp pattern matching
-                timestamp_pattern = re.compile(r'^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})')
-                
-                def extract_timestamp(log_line):
-                    match = timestamp_pattern.search(log_line)
-                    if match:
-                        try:
-                            ts = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
-                            return ts
-                        except ValueError:
-                            try:
-                                ts = datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S")
-                                return ts
-                            except ValueError:
-                                pass
-                    return datetime.min
-                
-                collected_logs.sort(key=extract_timestamp)
-            
-            # Update the live logs (keep only the last MAX_LOGS entries)
-            self.live_logs = collected_logs[-self.config.MAX_LOGS:]
-            
-            # Extract errors for error tracking
-            new_errors = self._extract_errors_from_logs(self.live_logs)
-            
-            # Update application errors list without duplicates
-            for error in new_errors:
-                if error not in self.application_errors:
-                    self.application_errors.append(error)
-            
-            # Keep only the most recent 20 errors
-            self.application_errors = self.application_errors[-20:]
-            
-        except Exception as e:
-            logger.error(f"Error collecting logs: {str(e)}")
-            # Add the error to live logs so it's visible in the UI
-            self.live_logs.append(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | ERROR | Error collecting logs: {str(e)}")
-    
-    def _extract_errors_from_logs(self, log_lines, max_errors=10):
-        """Extract error information from log lines with full context"""
-        errors = []
-        current_error = []
-        in_error = False
-        error_pattern = re.compile(r'(ERROR|Exception|Traceback|Error:|CRITICAL)', re.IGNORECASE)
-        
-        for line in log_lines:
-            if error_pattern.search(line):
-                if in_error and current_error:
-                    errors.append('\n'.join(current_error))
-                    current_error = []
-                in_error = True
-            
-            if in_error:
-                current_error.append(line)
-                # End of traceback typically has this pattern
-                if line.strip().startswith('File ') and ': ' in line:
-                    continue
-                elif line.strip() and not line.startswith(' '):
-                    in_error = False
-                    errors.append('\n'.join(current_error))
-                    current_error = []
-        
-        # Add the last error if there's one being processed
-        if in_error and current_error:
-            errors.append('\n'.join(current_error))
-        
-        # Return the most recent errors first
-        return errors[-max_errors:]
-    
-    def get_logs(self) -> List[str]:
-        """Get collected logs"""
-        # Always get fresh logs when requested
-        self.collect_logs()
-        return self.live_logs.copy()
-    
-    def get_errors(self) -> List[str]:
-        """Get application errors"""
-        return self.application_errors.copy()
-
-
-class ServiceMonitor:
-    """Monitors system service status"""
-    
-    def __init__(self, config):
-        self.config = config
-        self.service_history = []
-        self.last_check = {}
-        self.MAX_HISTORY = 100
-        
-        # Check for command availability
-        self._systemctl_path = self._check_command_exists('systemctl')
-        self._supervisorctl_path = self._check_command_exists('supervisorctl')
-        
-        if not self._systemctl_path:
-            logger.warning("systemctl not found - system service monitoring will be limited")
-        if not self._supervisorctl_path:
-            logger.warning("supervisorctl not found - supervisor service monitoring will be limited")
-    
-    def _check_command_exists(self, command):
-        """Check if a command exists and return its full path if found"""
-        try:
-            # Try common locations for the commands
-            if platform.system() == 'Windows':
-                # Windows doesn't typically have these commands
-                return None
-            else:
-                # Check in common bin directories
-                for path in ['/bin', '/usr/bin', '/usr/local/bin', '/sbin', '/usr/sbin']:
-                    cmd_path = os.path.join(path, command)
-                    if os.path.exists(cmd_path) and os.access(cmd_path, os.X_OK):
-                        logger.info(f"Found {command} at {cmd_path}")
-                        return cmd_path
-                
-                # If not found in common paths, use 'which' command as fallback
-                try:
-                    result = subprocess.run(['which', command], 
-                                          capture_output=True, 
-                                          text=True, 
-                                          check=False)
-                    if result.returncode == 0 and result.stdout.strip():
-                        cmd_path = result.stdout.strip()
-                        logger.info(f"Found {command} at {cmd_path}")
-                        return cmd_path
-                except:
-                    pass
-                
-                return None
-        except Exception as e:
-            logger.error(f"Error checking command existence for {command}: {e}")
-            return None
-        
-    def check_service_status(self, service_name):
-        """Check status of a service using appropriate system commands"""
-        status = "unknown"
-        
-        try:
-            if platform.system() == 'Windows':
-                # Use Windows SC command
-                result = subprocess.run(
-                    ['sc', 'query', service_name],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=5
-                )
-                
-                if result.returncode == 0:
-                    if "RUNNING" in result.stdout:
-                        status = "running"
-                    elif "STOPPED" in result.stdout:
-                        status = "stopped"
-                    elif "START_PENDING" in result.stdout:
-                        status = "starting"
-                    elif "STOP_PENDING" in result.stdout:
-                        status = "stopping"
-                else:
-                    status = "not_found"
-                    
-            else:
-                # Use systemctl for Linux systems
-                if service_name in self.config.supervisor_services:
-                    # Use supervisorctl for supervisor managed services
-                    if self._supervisorctl_path:
-                        result = subprocess.run(
-                            [self._supervisorctl_path, 'status', service_name],
-                            capture_output=True,
-                            text=True,
-                            check=False,
-                            timeout=5
-                        )
-                        
-                        if result.returncode == 0:
-                            if "RUNNING" in result.stdout:
-                                status = "running"
-                            elif "STOPPED" in result.stdout:
-                                status = "stopped"
-                            elif "STARTING" in result.stdout:
-                                status = "starting"
-                            elif "STOPPING" in result.stdout:
-                                status = "stopping"
-                            elif "FATAL" in result.stdout:
-                                status = "error"
-                        else:
-                            status = "not_found"
-                    else:
-                        logger.warning(f"Cannot check supervisor service {service_name} - supervisorctl not found")
-                        status = "check_error"
-                else:
-                    # Use systemctl for system services
-                    if self._systemctl_path:
-                        result = subprocess.run(
-                            [self._systemctl_path, 'is-active', service_name],
-                            capture_output=True,
-                            text=True,
-                            check=False,
-                            timeout=5
-                        )
-                        
-                        output = result.stdout.strip()
-                        if output == "active":
-                            status = "running"
-                        elif output in ["inactive", "dead"]:
-                            status = "stopped"
-                        elif output == "activating":
-                            status = "starting"
-                        elif output == "deactivating":
-                            status = "stopping"
-                        elif output in ["failed", "auto-restart"]:
-                            status = "error"
-                    else:
-                        logger.warning(f"Cannot check system service {service_name} - systemctl not found")
-                        status = "check_error"
-                        
-        except Exception as e:
-            logger.error(f"Error checking service {service_name}: {str(e)}")
-            status = "unknown"
-            
-        # Record the status and timestamp
-        timestamp = datetime.now()
-        self.last_check[service_name] = {
-            "status": status,
-            "timestamp": timestamp
+        self.alerts = []
+        self.is_running = False
+        self.alert_thresholds = {
+            'cpu_usage': 80,  # percentage
+            'memory_usage': 80,  # percentage
+            'disk_usage': 80,  # percentage
+            'error_rate': 5,  # percentage
+            'response_time': 2000  # milliseconds
         }
         
-        # Add to history with compact representation
-        self.service_history.append({
-            "service": service_name,
-            "status": status,
-            "timestamp": timestamp.isoformat()
+        # Load configuration if provided
+        self.config = self._load_config(config_file)
+        
+        # Database connection info (from config or defaults)
+        self.db_config = self.config.get('database', {
+            'enabled': False,
+            'path': 'e:\\LDB\\data\\ldb.db',
+            'check_interval': 30  # seconds
         })
         
-        # Trim history if needed
-        if len(self.service_history) > self.MAX_HISTORY:
-            self.service_history = self.service_history[-self.MAX_HISTORY:]
-            
-        return status
+        # Health check endpoints
+        self.health_checks = self.config.get('health_checks', [
+            {'name': 'Main API', 'url': 'http://localhost:8000/health', 'timeout': 5},
+            {'name': 'Database', 'type': 'database', 'timeout': 3}
+        ])
+        
+        # Add process monitoring
+        self.process_name = self.config.get('process_name', 'python')
+        self.pid = None
+        
+        logger.info("LDB Dashboard initialized")
     
-    def get_service_status(self):
-        """Get current status of all configured services"""
-        # Check each service status and return a dictionary of results
-        result = {}
-        for service in self.config.system_services + self.config.supervisor_services:
-            # Skip duplicates
-            if service in result:
-                continue
-                
-            try:
-                status = self.check_service_status(service)
-                result[service] = status
-            except Exception as e:
-                logger.error(f"Error getting status for service {service}: {e}")
-                result[service] = "error"
-                
-        return result
-    
-    def get_service_history(self):
-        """Get history of service status changes"""
-        return self.service_history
-
-
-class DebugSessionManager:
-    """Debug session management with real-time monitoring and diagnostics"""
-    
-    def __init__(self, config):
-        self.config = config
-        self.active_session = False
-        self.session_id = None
-        self.session_start_time = None
-        self.session_output = []
-        self.system_snapshots = []
-        self.MAX_OUTPUT = 100  # Maximum number of output lines to store
-        self.MAX_SNAPSHOTS = 10  # Maximum number of system snapshots to keep
-        self.session_thread = None
-        self.running = False
-    
-    def start_debug_session(self):
-        """Start a new debug session with diagnostics"""
-        if self.active_session:
-            return "Debug session already running"
-        
-        # Generate new session ID and record start time
-        self.session_id = f"debug_{int(time.time())}"
-        self.session_start_time = datetime.now()
-        self.active_session = True
-        self.session_output = []
-        self.system_snapshots = []
-        
-        # Add initial output
-        self.add_output(f"Debug session started at {self.session_start_time.isoformat()}")
-        self.add_output(f"Session ID: {self.session_id}")
-        
-        # Start background monitoring
-        self.running = True
-        self.session_thread = threading.Thread(target=self._session_monitoring_thread, daemon=True)
-        self.session_thread.start()
-        
-        # Take an immediate system snapshot
-        self._take_system_snapshot()
-        
-        # Attempt to collect diagnostic information
-        self._collect_diagnostics()
-        
-        return f"Debug session started with ID: {self.session_id}"
-    
-    def stop_debug_session(self):
-        """Stop the current debug session"""
-        if not self.active_session:
-            return "No active debug session"
-        
-        # Stop the background thread
-        self.running = False
-        if self.session_thread and self.session_thread.is_alive():
-            self.session_thread.join(timeout=2)
-        
-        # Take final snapshot
-        self._take_system_snapshot()
-        
-        # Calculate session duration
-        end_time = datetime.now()
-        duration = end_time - self.session_start_time
-        
-        # Add final output
-        self.add_output(f"Debug session stopped at {end_time.isoformat()}")
-        self.add_output(f"Session duration: {duration}")
-        
-        # Generate debug report
-        report = self._generate_debug_report()
-        self.add_output("Debug report generated")
-        
-        # Keep session info but mark as inactive
-        self.active_session = False
-        
-        return f"Debug session {self.session_id} stopped"
-    
-    def get_session_status(self):
-        """Get current debug session status and output"""
-        if not self.active_session and not self.session_id:
-            return {
-                "active": False,
-                "output": ["No debug session has been started"]
-            }
-        
-        # Return session status
-        return {
-            "active": self.active_session,
-            "session_id": self.session_id,
-            "start_time": self.session_start_time.isoformat() if self.session_start_time else None,
-            "output": self.session_output,
-            "snapshots": len(self.system_snapshots)
+    def _load_config(self, config_file):
+        """Load configuration from JSON file"""
+        default_config = {
+            'alert_thresholds': {
+                'cpu_usage': 80,
+                'memory_usage': 80,
+                'disk_usage': 80,
+                'error_rate': 5,
+                'response_time': 2000
+            },
+            'retention': {
+                'metrics_history': 100,
+                'alerts_history': 20
+            },
+            'database': {
+                'enabled': False,
+                'path': 'e:\\LDB\\data\\ldb.db',
+                'check_interval': 30
+            },
+            'process_name': 'python',
+            'log_dir': 'e:\\LDB\\logs'
         }
-    
-    def add_output(self, message):
-        """Add output to the current debug session"""
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        output_line = f"[{timestamp}] {message}"
-        self.session_output.append(output_line)
         
-        # Limit the output size
-        if len(self.session_output) > self.MAX_OUTPUT:
-            self.session_output = self.session_output[-self.MAX_OUTPUT:]
-    
-    def _session_monitoring_thread(self):
-        """Background thread to periodically collect system metrics"""
-        while self.running:
+        if config_file and os.path.exists(config_file):
             try:
-                # Take a system snapshot every 30 seconds
-                self._take_system_snapshot()
-                
-                # Sleep for 30 seconds
-                for _ in range(30):
-                    if not self.running:
-                        break
-                    time.sleep(1)
-            except Exception as e:
-                self.add_output(f"Error in monitoring thread: {str(e)}")
-                time.sleep(5)
-    
-    def _take_system_snapshot(self):
-        """Take a snapshot of current system metrics"""
-        try:
-            # Get CPU, memory, disk usage
-            cpu_percent = psutil.cpu_percent(interval=1)
-            memory = psutil.virtual_memory()
-            disk = psutil.disk_usage('/')
-            
-            # Get top processes by CPU and memory
-            processes = []
-            for proc in psutil.process_iter(['pid', 'name', 'username', 'cpu_percent', 'memory_percent']):
-                try:
-                    pinfo = proc.info
-                    processes.append(pinfo)
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    pass
-            
-            # Sort processes by CPU usage (descending)
-            processes.sort(key=lambda x: x.get('cpu_percent', 0), reverse=True)
-            top_cpu_processes = processes[:5]
-            
-            # Sort processes by memory usage (descending)
-            processes.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
-            top_memory_processes = processes[:5]
-            
-            # Create snapshot
-            snapshot = {
-                "timestamp": datetime.now().isoformat(),
-                "cpu_percent": cpu_percent,
-                "memory_percent": memory.percent,
-                "memory_used": memory.used,
-                "memory_total": memory.total,
-                "disk_percent": disk.percent,
-                "disk_used": disk.used,
-                "disk_total": disk.total,
-                "top_cpu_processes": [
-                    {"pid": p.get('pid', 0), 
-                     "name": p.get('name', 'unknown'), 
-                     "cpu_percent": p.get('cpu_percent', 0)} 
-                    for p in top_cpu_processes
-                ],
-                "top_memory_processes": [
-                    {"pid": p.get('pid', 0), 
-                     "name": p.get('name', 'unknown'), 
-                     "memory_percent": p.get('memory_percent', 0)} 
-                    for p in top_memory_processes
-                ]
-            }
-            
-            # Add snapshot to list
-            self.system_snapshots.append(snapshot)
-            
-            # Limit the number of snapshots
-            if len(self.system_snapshots) > self.MAX_SNAPSHOTS:
-                self.system_snapshots = self.system_snapshots[-self.MAX_SNAPSHOTS:]
-            
-            # Add output if active session
-            if self.active_session:
-                self.add_output(f"System snapshot: CPU {cpu_percent}%, Memory {memory.percent}%, Disk {disk.percent}%")
-        
-        except Exception as e:
-            logger.error(f"Error taking system snapshot: {str(e)}")
-            if self.active_session:
-                self.add_output(f"Error taking system snapshot: {str(e)}")
-    
-    def _collect_diagnostics(self):
-        """Collect diagnostic information about the system"""
-        try:
-            self.add_output("Collecting diagnostic information...")
-            
-            # Check Python version
-            self.add_output(f"Python version: {sys.version}")
-            
-            # Check available memory
-            memory = psutil.virtual_memory()
-            self.add_output(f"Memory: {memory.percent}% used ({memory.used / (1024 * 1024):.1f} MB / {memory.total / (1024 * 1024):.1f} MB)")
-            
-            # Check disk space
-            disk = psutil.disk_usage('/')
-            self.add_output(f"Disk: {disk.percent}% used ({disk.used / (1024 * 1024 * 1024):.1f} GB / {disk.total / (1024 * 1024 * 1024):.1f} GB)")
-            
-            # Check network interfaces
-            network_info = []
-            for interface, addrs in psutil.net_if_addrs().items():
-                for addr in addrs:
-                    if addr.family == socket.AF_INET:
-                        network_info.append(f"{interface}: {addr.address}")
-            
-            if network_info:
-                self.add_output("Network interfaces:")
-                for info in network_info:
-                    self.add_output(f"  - {info}")
-            
-            # Check environment variables
-            self.add_output("Checking environment variables...")
-            important_vars = ['PATH', 'PYTHONPATH', 'APP_DIR', 'DATABASE_URL']
-            for var in important_vars:
-                value = os.getenv(var)
-                self.add_output(f"  - {var}: {value if value else 'Not set'}")
-            
-            # Check for database connection
-            self.add_output("Checking database connection...")
-            try:
-                if self.config.database_url:
-                    db_engine = create_engine(self.config.database_url)
-                    with db_engine.connect() as conn:
-                        self.add_output("Database connection successful")
-                else:
-                    self.add_output("No database URL configured")
-            except Exception as e:
-                self.add_output(f"Database connection failed: {str(e)}")
-            
-            # Check for log files
-            self.add_output("Checking log files...")
-            for log_path in self.config.log_paths:
-                if os.path.exists(log_path):
-                    size = os.path.getsize(log_path)
-                    modified = datetime.fromtimestamp(os.path.getmtime(log_path)).isoformat()
-                    self.add_output(f"  - {log_path}: {size / 1024:.1f} KB, last modified: {modified}")
-                else:
-                    self.add_output(f"  - {log_path}: Not found")
-            
-            self.add_output("Diagnostic information collected")
-            
-        except Exception as e:
-            logger.error(f"Error collecting diagnostics: {str(e)}")
-            self.add_output(f"Error collecting diagnostics: {str(e)}")
-    
-    def _generate_debug_report(self):
-        """Generate a debug report from the current session"""
-        # This could be expanded to create a downloadable report file
-        return {
-            "session_id": self.session_id,
-            "start_time": self.session_start_time.isoformat() if self.session_start_time else None,
-            "end_time": datetime.now().isoformat(),
-            "output": self.session_output,
-            "snapshots": self.system_snapshots
-        }
-
-
-class Dashboard:
-    """Main dashboard class that coordinates all monitoring components"""
-    
-    def __init__(self):
-        self.config = DashboardConfig()
-        self.system_info = SystemInformation()
-        self.log_collector = LogCollector(self.config)
-        self.service_monitor = ServiceMonitor(self.config)
-        self.debug_manager = DebugSessionManager(self.config)
-        
-        # Initialize Flask app
-        self.app = Flask(__name__)
-        self.running = False
-        self.collection_thread = None
-        
-        # Create DB engine for monitoring
-        try:
-            self.db_engine = create_engine(
-                self.config.database_url,
-                pool_pre_ping=True,
-                pool_recycle=3600
-            )
-        except Exception as e:
-            logger.error(f"Failed to create database engine: {e}")
-            self.db_engine = None
-
-        # Initialize core monitoring system
-        self.initialize_monitoring()
-        
-        # Setup CORS if needed
-        try:
-            CORS(self.app, resources={r"/api/*": {"origins": self.config.cors_origins}})
-            logger.info(f"CORS enabled for API endpoints with origins: {self.config.cors_origins}")
-        except ImportError:
-            logger.warning("flask-cors not installed. CORS support disabled.")
-    
-    def initialize_monitoring(self):
-        """Initialize pre-made monitoring modules"""
-        try:
-            # Setup the core monitoring system with error handling for missing methods
-            try:
-                # Import the monitoring core system
-                from app.monitoring.core import MonitoringSystem
-                self.monitoring = MonitoringSystem()
-                logger.info("Core monitoring system initialized successfully")
-            except TypeError as e:
-                logger.error(f"Error initializing monitoring system: {e}", exc_info=True)
-                self.monitoring = None
-                logger.warning("Using fallback monitoring components - ALERT: Core monitoring not available")
-            
-            # Get component references for direct access
-            self.system_metrics = self.monitoring.components.get("system_metrics") if self.monitoring else None
-            self.db_monitor = self.monitoring.components.get("database") if self.monitoring else None
-            self.health_check = self.monitoring.components.get("health_checks") if self.monitoring else None
-            self.app_metrics = self.monitoring.components.get("application") if self.monitoring else None
-            
-            # Check if we got the components we need
-            if not self.system_metrics:
-                logger.warning("System metrics component not found, creating new instance - ALERT: Using fallback")
-                from app.monitoring.system_metrics import SystemMetricsCollector
-                self.system_metrics = SystemMetricsCollector(interval=30, history_size=1000)
-                self.system_metrics.start()
-                logger.info("Started fallback system metrics collector")
-                if hasattr(self.monitoring, 'register_component') and self.monitoring:
-                    self.monitoring.register_component("system_metrics", self.system_metrics)
-                    logger.info("Registered fallback system metrics with core monitoring")
-                
-            if not self.db_monitor and self.db_engine:
-                logger.warning("Database monitor component not found, creating new instance - ALERT: Using fallback")
-                from app.monitoring.database_monitor import DatabaseMonitor
-                self.db_monitor = DatabaseMonitor(self.db_engine, interval=30)
-                # Add safety wrapper for missing methods
-                if not hasattr(self.db_monitor, 'get_primary_keys'):
-                    logger.warning("Database monitor missing methods, adding safety wrappers")
-                    setattr(self.db_monitor, 'get_primary_keys', lambda table: [])
-                # Start the database monitor explicitly
-                self.db_monitor.start()
-                logger.info("Started database monitor manually")
-                if hasattr(self.monitoring, 'register_component') and self.monitoring:
-                    self.monitoring.register_component("database", self.db_monitor)
-                    logger.info("Registered fallback database monitor with core monitoring")
-                
-            if not self.health_check:
-                logger.warning("Health check component not found, creating new instance - ALERT: Using fallback")
-                from app.monitoring.health_checks import HealthCheckService
-                self.health_check = HealthCheckService(self.app)
-                if hasattr(self.monitoring, 'register_component') and self.monitoring:
-                    self.monitoring.register_component("health_checks", self.health_check)
-                    logger.info("Registered fallback health check service with core monitoring")
-                
-            if not self.app_metrics:
-                logger.warning("Application metrics component not found, creating new instance - ALERT: Using fallback")
-                from app.monitoring.application_metrics import ApplicationMetrics
-                self.app_metrics = ApplicationMetrics(self.app)
-                if hasattr(self.monitoring, 'register_component') and self.monitoring:
-                    self.monitoring.register_component("application", self.app_metrics)
-                    logger.info("Registered fallback application metrics with core monitoring")
-                
-            # Add health checks for the music data pipeline
-            self._register_pipeline_health_checks()
-                
-        except Exception as e:
-            logger.error(f"Failed to initialize monitoring components: {e}", exc_info=True)
-            # Create fallback instances if the imports failed
-            self.monitoring = None
-            
-            try:
-                from app.monitoring.system_metrics import SystemMetricsCollector
-                self.system_metrics = SystemMetricsCollector(interval=30, history_size=1000)
-                self.system_metrics.start()
-                logger.warning("ALERT: Using emergency fallback for system metrics collection")
-            except Exception as sys_e:
-                logger.critical(f"CRITICAL: Failed to initialize system metrics: {sys_e}", exc_info=True)
-                self.system_metrics = None
-            
-            # Create a database monitor if engine is available
-            self.db_monitor = None
-            if self.db_engine:
-                try:
-                    from app.monitoring.database_monitor import DatabaseMonitor
-                    self.db_monitor = DatabaseMonitor(self.db_engine, interval=30)
-                    self.db_monitor.start()
-                    logger.warning("ALERT: Using emergency fallback for database monitoring")
-                except Exception as db_e:
-                    logger.critical(f"CRITICAL: Failed to initialize database monitoring: {db_e}", exc_info=True)
-            
-            # Create other components
-            try:
-                from app.monitoring.health_checks import HealthCheckService
-                self.health_check = HealthCheckService(self.app)
-                logger.warning("ALERT: Using emergency fallback for health checks")
-            except Exception as hc_e:
-                logger.critical(f"CRITICAL: Failed to initialize health checks: {hc_e}", exc_info=True)
-                self.health_check = None
-                
-            try:
-                from app.monitoring.application_metrics import ApplicationMetrics
-                self.app_metrics = ApplicationMetrics(self.app)
-                logger.warning("ALERT: Using emergency fallback for application metrics")
-            except Exception as am_e:
-                logger.critical(f"CRITICAL: Failed to initialize application metrics: {am_e}", exc_info=True)
-                self.app_metrics = None
-    
-    def _register_pipeline_health_checks(self):
-        """Register health checks for the music data pipeline"""
-        if not self.health_check:
-            logger.error("Cannot register pipeline health checks - health check service not available")
-            return False
-            
-        try:
-            # Register music data pipeline health checks
-            self.health_check.register_check("music_pipeline", self._check_music_pipeline_health)
-            self.health_check.register_check("recommendation_system", self._check_recommendation_system)
-            self.health_check.register_check("enrichment_services", self._check_enrichment_services)
-            self.health_check.register_check("artist_data_collector", self._check_artist_collector)
-            logger.info("Registered music pipeline health checks successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to register pipeline health checks: {e}", exc_info=True)
-            return False
-    
-    def _check_music_pipeline_health(self):
-        """Health check for overall music data pipeline"""
-        try:
-            # Check if all essential services are running
-            collectors_status = self._check_collectors_status()
-            enrichers_status = self._check_enrichers_status()
-            analysis_status = self._check_analysis_status()
-            
-            if collectors_status == "ok" and enrichers_status == "ok" and analysis_status == "ok":
-                return {"status": "ok", "message": "Music pipeline is fully operational"}
-            
-            issues = []
-            if collectors_status != "ok":
-                issues.append(f"Collectors: {collectors_status}")
-            if enrichers_status != "ok":
-                issues.append(f"Enrichers: {enrichers_status}")
-            if analysis_status != "ok":
-                issues.append(f"Analysis: {analysis_status}")
-                
-            # If any component has an error, report pipeline as error
-            if "error" in [collectors_status, enrichers_status, analysis_status]:
-                return {"status": "error", "message": f"Pipeline issues: {', '.join(issues)}"}
-            else:
-                return {"status": "warning", "message": f"Pipeline degraded: {', '.join(issues)}"}
-        except Exception as e:
-            logger.error(f"Error in music pipeline health check: {e}", exc_info=True)
-            return {"status": "error", "message": f"Health check error: {str(e)}"}
-    
-    def _check_collectors_status(self):
-        """Check the status of data collectors"""
-        try:
-            # In a real implementation, this would check actual collector status
-            # For now, simulate checking collector services
-            return "ok"  # Placeholder - implement actual checks
-        except Exception as e:
-            logger.error(f"Error checking collectors: {e}", exc_info=True)
-            return "error"
-    
-    def _check_enrichers_status(self):
-        """Check the status of data enrichers"""
-        try:
-            # In a real implementation, this would check enricher services
-            return "ok"  # Placeholder - implement actual checks
-        except Exception as e:
-            logger.error(f"Error checking enrichers: {e}", exc_info=True)
-            return "error"
-    
-    def _check_analysis_status(self):
-        """Check the status of analysis components"""
-        try:
-            # In a real implementation, this would check analysis services
-            return "ok"  # Placeholder - implement actual checks
-        except Exception as e:
-            logger.error(f"Error checking analysis components: {e}", exc_info=True)
-            return "error"
-    
-    def _check_recommendation_system(self):
-        """Health check for recommendation system"""
-        try:
-            # In a real implementation, check recommendation system health
-            # Check if models are loaded, response times are acceptable, etc.
-            return {"status": "ok", "message": "Recommendation system operational"}
-        except Exception as e:
-            logger.error(f"Error in recommendation health check: {e}", exc_info=True)
-            return {"status": "error", "message": f"Health check error: {str(e)}"}
-    
-    def _check_enrichment_services(self):
-        """Health check for enrichment services (Spotify, lyrics, etc.)"""
-        try:
-            # Check enrichment services connectivity and response times
-            return {"status": "ok", "message": "Enrichment services operational"}
-        except Exception as e:
-            logger.error(f"Error in enrichment services health check: {e}", exc_info=True)
-            return {"status": "error", "message": f"Health check error: {str(e)}"}
-    
-    def _check_artist_collector(self):
-        """Health check for artist data collector"""
-        try:
-            # Check artist collector status, recent data collection activity
-            return {"status": "ok", "message": "Artist data collector operational"}
-        except Exception as e:
-            logger.error(f"Error in artist collector health check: {e}", exc_info=True)
-            return {"status": "error", "message": f"Health check error: {str(e)}"}
-    
-    def start_metrics_collection(self):
-        """Start metrics collection and database monitoring"""
-        logger.info("Starting metrics collection")
-        
-        # Ensure the database monitor is started if available
-        if self.db_monitor and hasattr(self.db_monitor, 'start'):
-            try:
-                # Check if it's already running before starting
-                if not (hasattr(self.db_monitor, 'thread') and 
-                        self.db_monitor.thread and 
-                        self.db_monitor.thread.is_alive()):
-                    self.db_monitor.start()
-                    logger.info("Started database monitor")
-                    
-                # Verify that the database monitor thread is actually running
-                if hasattr(self.db_monitor, 'thread') and not self.db_monitor.thread.is_alive():
-                    logger.error("Database monitor thread failed to start - ALERT: Database monitoring unavailable")
-                    # Attempt to restart
-                    self.db_monitor.start()
-                    logger.info("Attempted to restart database monitor")
-            except Exception as e:
-                logger.error(f"Error starting database monitor: {e}", exc_info=True)
-                
-        # Ensure system metrics collector is started if available
-        if self.system_metrics and hasattr(self.system_metrics, 'start'):
-            try:
-                # Check if it's already running before starting
-                if not (hasattr(self.system_metrics, 'thread') and 
-                        self.system_metrics.thread and 
-                        self.system_metrics.thread.is_alive()):
-                    self.system_metrics.start()
-                    logger.info("Started system metrics collector")
-                    
-                # Verify that the system metrics thread is actually running
-                if hasattr(self.system_metrics, 'thread') and not self.system_metrics.thread.is_alive():
-                    logger.error("System metrics thread failed to start - ALERT: System monitoring unavailable")
-                    # Attempt to restart
-                    self.system_metrics.start()
-                    logger.info("Attempted to restart system metrics collector")
-            except Exception as e:
-                logger.error(f"Error starting system metrics collector: {e}", exc_info=True)
-                
-        # Add application metrics for music pipeline
-        if self.app_metrics:
-            try:
-                # Register custom business metrics for the music pipeline - using a safer approach
-                # Check if the methods exist before calling them
-                if hasattr(self.app_metrics, 'register_counter'):
-                    self.app_metrics.register_counter("pipeline_events", "Total music pipeline events processed")
-                    self.app_metrics.register_counter("pipeline_errors", "Total errors in music pipeline")
-                    self.app_metrics.register_counter("artist_discovery", "New artists discovered by collectors", ["source"])
-                    self.app_metrics.register_counter("enrichment_operations", "Enrichment operations performed", ["service"])
-                    
-                if hasattr(self.app_metrics, 'register_histogram'):
-                    self.app_metrics.register_histogram("llm_analysis_time", "Time taken for LLM analysis in seconds")
-                
-                if hasattr(self.app_metrics, 'register_gauge'):
-                    self.app_metrics.register_gauge("pipeline_queue_size", "Current size of the music pipeline queue")
-                    self.app_metrics.register_gauge("llm_model_load", "Current load on the LLM model")
-                
-                # Add some demo metrics if they don't exist and if the methods exist
-                if not hasattr(self.app_metrics, '_demo_metrics_added'):
-                    # Add some demo metrics using safer approach - check for methods first
-                    if hasattr(self.app_metrics, 'track_recommendation'):
-                        self.app_metrics.track_recommendation("personalized")
-                        self.app_metrics.track_recommendation("trending")
-                    
-                    if hasattr(self.app_metrics, 'track_search'):
-                        self.app_metrics.track_search("artist")
-                        self.app_metrics.track_search("song")
-                    
-                    if hasattr(self.app_metrics, 'set_recommendation_quality'):
-                        self.app_metrics.set_recommendation_quality(0.85, "personalized")
-                    
-                    # Track pipeline metrics with example values - check methods first
-                    if hasattr(self.app_metrics, 'increment_counter'):
-                        self.app_metrics.increment_counter("pipeline_events", 157)
-                        self.app_metrics.increment_counter("pipeline_errors", 3)
-                        self.app_metrics.increment_counter("artist_discovery", 27, {"source": "youtube"})
-                        self.app_metrics.increment_counter("artist_discovery", 18, {"source": "instagram"})
-                        self.app_metrics.increment_counter("enrichment_operations", 112, {"service": "spotify"})
-                        self.app_metrics.increment_counter("enrichment_operations", 98, {"service": "lyrics"})
-                    
-                    if hasattr(self.app_metrics, 'observe_histogram'):
-                        self.app_metrics.observe_histogram("llm_analysis_time", 0.532)
-                    
-                    if hasattr(self.app_metrics, 'set_gauge'):
-                        self.app_metrics.set_gauge("pipeline_queue_size", 45)
-                        self.app_metrics.set_gauge("llm_model_load", 0.37)
-                    
-                    # Mark that we've added demo metrics
-                    setattr(self.app_metrics, '_demo_metrics_added', True)
-                    logger.info("Added business logic application metrics for music pipeline")
-            except Exception as e:
-                logger.error(f"Error adding application metrics: {e}", exc_info=True)
-                logger.warning("Application metrics may not be fully available - using defaults if needed")
-
-        # Verify that all exporters are properly initialized
-        try:
-            from app.monitoring.exporters.prometheus import PrometheusExporter
-            prometheus_exporter = PrometheusExporter()
-            prometheus_exporter.start()
-            logger.info("Started Prometheus metrics exporter")
-        except ImportError:
-            logger.warning("Prometheus exporter not available - metrics will not be exported to Prometheus")
-        except Exception as e:
-            logger.error(f"Error starting Prometheus exporter: {e}", exc_info=True)
-            
-        # Register custom exporters if defined in configuration
-        try:
-            custom_exporters = os.getenv("DASHBOARD_CUSTOM_EXPORTERS", "").split(",")
-            for exporter_name in custom_exporters:
-                if exporter_name and exporter_name.strip():
-                    try:
-                        logger.info(f"Attempting to load custom exporter: {exporter_name}")
-                        module_path = f"app.monitoring.exporters.{exporter_name.strip()}"
-                        exporter_module = importlib.import_module(module_path)
-                        exporter_class = getattr(exporter_module, f"{exporter_name.strip().capitalize()}Exporter")
-                        exporter = exporter_class()
-                        exporter.start()
-                        logger.info(f"Started custom metrics exporter: {exporter_name}")
-                    except (ImportError, AttributeError) as e:
-                        logger.error(f"Failed to load custom exporter {exporter_name}: {e}", exc_info=True)
-        except Exception as e:
-            logger.error(f"Error initializing custom exporters: {e}", exc_info=True)
-        
-        return True
-
-    def setup_routes(self):
-        """Set up Flask routes for the dashboard"""
-        
-        @self.app.route('/')
-        def dashboard_home():
-            """Home page of the dashboard"""
-            try:
-                return self._render_dashboard_template()
-            except Exception as e:
-                logger.error(f"Error rendering dashboard: {e}", exc_info=True)
-                return f"Error rendering dashboard: {str(e)}", 500
-        
-        @self.app.route('/api/metrics')
-        def api_metrics():
-            """API endpoint for current system metrics"""
-            try:
-                # Get system metrics
-                metrics = {}
-                if self.system_metrics:
-                    metrics = self.system_metrics.get_current_metrics()
-                
-                # Add service statuses
-                metrics['services'] = self.service_monitor.get_service_status()
-                
-                # Add database connection status
-                metrics['db_connection'] = 'connected' if self.db_engine else 'disconnected'
-                if self.db_monitor:
-                    try:
-                        db_info = self.db_monitor.get_connection_info()
-                        metrics['db_connection'] = db_info.get('status', 'unknown')
-                    except Exception as e:
-                        logger.error(f"Error getting DB connection info: {e}", exc_info=True)
-                        metrics['db_connection'] = 'error'
-                
-                # Ensure timestamp is included
-                if 'timestamp' not in metrics:
-                    metrics['timestamp'] = datetime.now().isoformat()
-                
-                return jsonify(metrics)
-            except Exception as e:
-                logger.error(f"Error in metrics API: {e}", exc_info=True)
-                return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
-        
-        @self.app.route('/api/history')
-        def api_history():
-            """API endpoint for historical metrics"""
-            try:
-                history = {}
-                
-                # Get system metrics history
-                if self.system_metrics:
-                    history['system'] = self.system_metrics.get_history()
-                
-                # Get service status history
-                history['services'] = self.service_monitor.get_service_history()
-                
-                # Get database metrics history
-                if self.db_monitor:
-                    try:
-                        history['database'] = self.db_monitor.get_history()
-                    except Exception as e:
-                        logger.error(f"Error getting DB history: {e}", exc_info=True)
-                        history['database'] = []
-                
-                # Add health check history if available
-                if self.health_check and hasattr(self.health_check, 'get_history'):
-                    history['health_checks'] = self.health_check.get_history()
-                
-                return jsonify(history)
-            except Exception as e:
-                logger.error(f"Error in history API: {e}", exc_info=True)
-                return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
-        
-        @self.app.route('/api/services')
-        def api_services():
-            """API endpoint for service statuses"""
-            try:
-                return jsonify(self.service_monitor.get_service_status())
-            except Exception as e:
-                logger.error(f"Error in services API: {e}", exc_info=True)
-                return jsonify({"error": str(e)}), 500
-        
-        @self.app.route('/api/db')
-        def api_database():
-            """API endpoint for database metrics and information"""
-            try:
-                result = {
-                    "connection_status": "disconnected",
-                    "tables": [],
-                    "slow_queries": []
-                }
-                
-                # Check DB connection
-                if self.db_engine:
-                    try:
-                        with self.db_engine.connect() as conn:
-                            # Test query
-                            conn.execute(text("SELECT 1"))
-                            result["connection_status"] = "connected"
-                    except Exception as e:
-                        logger.error(f"Database connection error: {e}", exc_info=True)
-                        result["connection_status"] = "error"
-                        result["error"] = str(e)
-                
-                # Get database metrics from monitor
-                if self.db_monitor:
-                    try:
-                        # Get table statistics
-                        if hasattr(self.db_monitor, 'get_table_stats'):
-                            result["tables"] = self.db_monitor.get_table_stats()
-                        
-                        # Get slow queries
-                        if hasattr(self.db_monitor, 'get_slow_queries'):
-                            result["slow_queries"] = self.db_monitor.get_slow_queries()
-                            
-                        # Get additional database metrics if available
-                        if hasattr(self.db_monitor, 'get_metrics'):
-                            result["metrics"] = self.db_monitor.get_metrics()
-                    except Exception as e:
-                        logger.error(f"Error getting database metrics: {e}", exc_info=True)
-                        result["metrics_error"] = str(e)
-                
-                return jsonify(result)
-            except Exception as e:
-                logger.error(f"Error in database API: {e}", exc_info=True)
-                return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
-        
-        @self.app.route('/api/health')
-        def api_health():
-            """API endpoint for health check results"""
-            try:
-                health_checks = {}
-                
-                # Get health check results from the health check service
-                if self.health_check:
-                    try:
-                        # Use a single standard method name for health checks
-                        if hasattr(self.health_check, 'run_all_checks'):
-                            health_checks = self.health_check.run_all_checks()
+                with open(config_file, 'r') as f:
+                    loaded_config = json.load(f)
+                    # Merge with defaults
+                    for key, value in loaded_config.items():
+                        if isinstance(value, dict) and key in default_config:
+                            default_config[key].update(value)
                         else:
-                            logger.warning("Health check service does not have run_all_checks method")
-                            health_checks = {}
-                    except Exception as e:
-                        logger.error(f"Error running health checks: {e}", exc_info=True)
-                        health_checks = {}
-                
-                # If no health checks were retrieved, use basic ones
-                if not health_checks:
-                    health_checks = {
-                        "system": self._basic_system_health_check(),
-                        "database": self._basic_database_health_check(),
-                        "music_pipeline": self._check_music_pipeline_health(),
-                        "recommendation_system": self._check_recommendation_system(),
-                        "enrichment_services": self._check_enrichment_services()
-                    }
-                
-                return jsonify(health_checks)
+                            default_config[key] = value
+                    logger.info(f"Configuration loaded from {config_file}")
             except Exception as e:
-                logger.error(f"Error in health API: {e}", exc_info=True)
-                return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+                logger.error(f"Error loading configuration: {str(e)}")
         
-        @self.app.route('/api/logs')
-        def api_logs():
-            """API endpoint for application logs"""
-            try:
-                logs = self.log_collector.get_logs()
-                return jsonify(logs)
-            except Exception as e:
-                logger.error(f"Error in logs API: {e}", exc_info=True)
-                return jsonify({"error": str(e)}), 500
+        # Update alert thresholds from config
+        self.alert_thresholds = default_config['alert_thresholds']
         
-        @self.app.route('/api/errors')
-        def api_errors():
-            """API endpoint for application errors"""
-            try:
-                errors = self.log_collector.get_errors()
-                return jsonify(errors)
-            except Exception as e:
-                logger.error(f"Error in errors API: {e}", exc_info=True)
-                return jsonify({"error": str(e)}), 500
+        return default_config
+    
+    def start_monitoring(self):
+        """Start the metrics collection thread"""
+        if not self.is_running:
+            self.is_running = True
+            self.monitor_thread = threading.Thread(target=self._collect_metrics)
+            self.monitor_thread.daemon = True
+            self.monitor_thread.start()
+            logger.info("Monitoring started")
+            return True
+        logger.warning("Monitoring already running")
+        return False
         
-        @self.app.route('/api/system')
-        def api_system():
-            """API endpoint for system information"""
+    def stop_monitoring(self):
+        """Stop the metrics collection thread"""
+        if self.is_running:
+            self.is_running = False
+            logger.info("Monitoring stopped")
+            return True
+        logger.warning("Monitoring already stopped")
+        return False
+    
+    def _collect_metrics(self):
+        """Collect system and application metrics at regular intervals"""
+        last_db_check = 0
+        
+        while self.is_running:
             try:
-                system_info = self.system_info.get_info()
+                timestamp = datetime.datetime.now()
+                # System metrics
+                cpu = psutil.cpu_percent(interval=1)
+                memory = psutil.virtual_memory().percent
+                disk = psutil.disk_usage('/').percent
+                network = psutil.net_io_counters()
+                net_sent_recv = network.bytes_sent + network.bytes_recv
                 
-                # Add current process information
-                process = psutil.Process()
-                system_info["process"] = {
-                    "pid": process.pid,
-                    "cpu_percent": process.cpu_percent(interval=1),
-                    "memory_info": {
-                        "rss": process.memory_info().rss,
-                        "vms": process.memory_info().vms
-                    },
-                    "create_time": datetime.fromtimestamp(process.create_time()).isoformat(),
-                    "threads": len(process.threads())
-                }
+                # Record metrics
+                self.metrics['timestamp'].append(timestamp)
+                self.metrics['cpu_usage'].append(cpu)
+                self.metrics['memory_usage'].append(memory)
+                self.metrics['disk_usage'].append(disk)
+                self.metrics['network_traffic'].append(net_sent_recv)
                 
-                return jsonify(system_info)
+                # Monitor specific LDB process if possible
+                self._monitor_ldb_process()
+                
+                # Check database metrics periodically
+                if self.db_config['enabled'] and (time.time() - last_db_check > self.db_config['check_interval']):
+                    self._collect_database_metrics()
+                    last_db_check = time.time()
+                
+                # Run health checks
+                self._run_health_checks()
+                
+                # Check for alerts
+                self._check_alerts(cpu, memory, disk)
+                
+                # Keep only the configured amount of history
+                max_history = self.config['retention']['metrics_history']
+                for key in ['timestamp', 'cpu_usage', 'memory_usage', 'disk_usage', 
+                           'network_traffic', 'response_times', 'active_connections',
+                           'db_query_times', 'custom_events', 'process_memory']:
+                    if len(self.metrics[key]) > max_history:
+                        self.metrics[key] = self.metrics[key][-max_history:]
+                
+                # Sleep until next collection
+                time.sleep(self.update_interval)
             except Exception as e:
-                logger.error(f"Error in system API: {e}", exc_info=True)
-                return jsonify({"error": str(e)}), 500
-        
-        @self.app.route('/api/network')
-        def api_network():
-            """API endpoint for network diagnostics"""
-            try:
-                # Get network interfaces
-                interfaces = {}
+                logger.error(f"Error collecting metrics: {str(e)}")
+                time.sleep(self.update_interval)
+    
+    def _monitor_ldb_process(self):
+        """Monitor the LDB process specifically"""
+        try:
+            # Find the process if we don't have it yet
+            if not self.pid:
+                for proc in psutil.process_iter(['pid', 'name']):
+                    if self.process_name in proc.info['name'].lower():
+                        self.pid = proc.info['pid']
+                        logger.info(f"Found LDB process with PID {self.pid}")
+                        break
+            
+            # Get process stats if we have a PID
+            if self.pid:
                 try:
-                    for interface, addrs in psutil.net_if_addrs().items():
-                        interfaces[interface] = [
-                            {
-                                "address": addr.address,
-                                "netmask": addr.netmask,
-                                "family": str(addr.family)
-                            }
-                            for addr in addrs if addr.family == socket.AF_INET
-                        ]
-                except Exception as e:
-                    logger.error(f"Error getting network interfaces: {e}", exc_info=True)
-                
-                # Check internet and local connectivity
-                connectivity = {
-                    "internet": self._check_internet_connectivity(),
-                    "localhost": self._check_localhost_connectivity()
-                }
-                
-                # Get binding information
-                binding = {
-                    "host": self.config.bind_host,
-                    "port": self.config.bind_port,
-                    "allow_external": self.config.allow_external
-                }
-                
-                return jsonify({
-                    "interfaces": interfaces,
-                    "connectivity": connectivity,
-                    "binding": binding
-                })
-            except Exception as e:
-                logger.error(f"Error in network API: {e}", exc_info=True)
-                return jsonify({"error": str(e)}), 500
-            
-        @self.app.route('/api/application/metrics')
-        def api_application_metrics():
-            """API endpoint for application-specific metrics and events"""
-            try:
-                metrics = {}
-                
-                # Get application metrics from the app metrics service
-                if self.app_metrics:
-                    try:
-                        if hasattr(self.app_metrics, 'get_all_metrics'):
-                            metrics = self.app_metrics.get_all_metrics()
-                        elif hasattr(self.app_metrics, 'metrics'):
-                            metrics = self.app_metrics.metrics
-                    except Exception as e:
-                        logger.error(f"Error getting application metrics: {e}", exc_info=True)
-                
-                # If no metrics service or error occurred, return default metrics
-                if not metrics:
-                    # Create default application metrics for demonstration
-                    metrics = {
-                        "pipeline_events": {
-                            "type": "counter",
-                            "description": "Total music pipeline events processed",
-                            "values": {"default": 157}
-                        },
-                        "pipeline_errors": {
-                            "type": "counter",
-                            "description": "Total errors in music pipeline",
-                            "values": {"default": 3}
-                        },
-                        "llm_analysis_time": {
-                            "type": "histogram",
-                            "description": "Time taken for LLM analysis in seconds",
-                            "values": {"default": {"avg": 0.532, "min": 0.2, "max": 1.1, "p95": 0.9}}
-                        },
-                        "pipeline_queue_size": {
-                            "type": "gauge",
-                            "description": "Current size of the music pipeline queue",
-                            "values": {"default": 45}
-                        },
-                        "llm_model_load": {
-                            "type": "gauge",
-                            "description": "Current load on the LLM model",
-                            "values": {"default": 0.37}
-                        }
-                    }
-                
-                return jsonify(metrics)
-            except Exception as e:
-                logger.error(f"Error in application metrics API: {e}", exc_info=True)
-                return jsonify({"error": str(e)}), 500
-
-        @self.app.route('/status')
-        def status():
-            """Simple status endpoint for health checks"""
-            try:
-                # Basic status check that doesn't require authentication
-                uptime = datetime.now() - datetime.fromtimestamp(psutil.boot_time())
-                return jsonify({
-                    "status": "ok",
-                    "service": "ldb_dashboard",
-                    "version": self.config.app_version,
-                    "timestamp": datetime.now().isoformat(),
-                    "uptime": str(uptime)
-                })
-            except Exception as e:
-                logger.error(f"Error in status endpoint: {e}", exc_info=True)
-                return jsonify({"status": "error", "error": str(e)}), 500
-        
-        # Debug session management endpoints
-        @self.app.route('/api/debug/start', methods=['POST'])
-        def api_debug_start():
-            """API endpoint to start a debug session"""
-            try:
-                result = self.debug_manager.start_debug_session()
-                return jsonify({"status": "success", "message": result})
-            except Exception as e:
-                logger.error(f"Error starting debug session: {e}", exc_info=True)
-                return jsonify({"status": "error", "message": str(e)}), 500
-        
-        @self.app.route('/api/debug/stop', methods=['POST'])
-        def api_debug_stop():
-            """API endpoint to stop a debug session"""
-            try:
-                result = self.debug_manager.stop_debug_session()
-                return jsonify({"status": "success", "message": result})
-            except Exception as e:
-                logger.error(f"Error stopping debug session: {e}", exc_info=True)
-                return jsonify({"status": "error", "message": str(e)}), 500
-        
-        @self.app.route('/api/debug/status')
-        def api_debug_status():
-            """API endpoint to get current debug session status"""
-            try:
-                status = self.debug_manager.get_session_status()
-                return jsonify(status)
-            except Exception as e:
-                logger.error(f"Error getting debug status: {e}", exc_info=True)
-                return jsonify({"status": "error", "message": str(e)}), 500
-                
-    def _basic_system_health_check(self):
-        """Basic system health check when the health check service isn't available"""
-        try:
-            # Check CPU, memory, and disk
-            cpu_percent = psutil.cpu_percent(interval=1)
-            memory = psutil.virtual_memory()
-            disk = psutil.disk_usage('/')
-            
-            status = "ok"
-            message = "System resources are within normal limits"
-            
-            # Determine status based on resource usage
-            if cpu_percent > 90 or memory.percent > 90 or disk.percent > 90:
-                status = "error"
-                message = "Critical system resource usage"
-            elif cpu_percent > 80 or memory.percent > 80 or disk.percent > 80:
-                status = "warning"
-                message = "High system resource usage"
-            
-            return {
-                "status": status,
-                "message": message,
-                "details": {
-                    "cpu_percent": cpu_percent,
-                    "memory_percent": memory.percent,
-                    "disk_percent": disk.percent
-                }
-            }
-        except Exception as e:
-            logger.error(f"Error in basic system health check: {e}", exc_info=True)
-            return {"status": "error", "message": f"Health check error: {str(e)}"}
-    
-    def _basic_database_health_check(self):
-        """Basic database health check when the health check service isn't available"""
-        try:
-            if not self.db_engine:
-                return {"status": "error", "message": "Database connection not configured"}
-            
-            try:
-                with self.db_engine.connect() as conn:
-                    # Test simple query
-                    conn.execute(text("SELECT 1"))
-                    return {"status": "ok", "message": "Database connection successful"}
-            except Exception as e:
-                logger.error(f"Database connectivity error: {e}", exc_info=True)
-                return {"status": "error", "message": f"Database connectivity error: {str(e)}"}
-        except Exception as e:
-            logger.error(f"Error in basic database health check: {e}", exc_info=True)
-            return {"status": "error", "message": f"Health check error: {str(e)}"}
-    
-    def _check_internet_connectivity(self):
-        """Check if internet is accessible"""
-        try:
-            # Try to connect to Google's DNS
-            socket.create_connection(("8.8.8.8", 53), timeout=3)
-            return True
-        except OSError:
-            return False
-        except Exception as e:
-            logger.error(f"Error checking internet connectivity: {e}", exc_info=True)
-            return False
-    
-    def _check_localhost_connectivity(self):
-        """Check if localhost is accessible"""
-        try:
-            # Try to connect to localhost on our own port
-            socket.create_connection(("127.0.0.1", self.config.bind_port), timeout=1)
-            return True
-        except OSError:
-            try:
-                # Try an alternative port (80) in case our port isn't bound yet
-                socket.create_connection(("127.0.0.1", 80), timeout=1)
-                return True
-            except:
-                pass
-            return False
-        except Exception as e:
-            logger.error(f"Error checking localhost connectivity: {e}", exc_info=True)
-            return False
-
-    def _render_dashboard_template(self):
-        """Render the dashboard HTML template"""
-        try:
-            # Create a basic HTML dashboard template
-            dashboard_html = """
-            <!DOCTYPE html>
-            <html lang="en">
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>LDB Monitoring Dashboard</title>
-                <style>
-                    body {
-                        font-family: Arial, sans-serif;
-                        margin: 0;
-                        padding: 0;
-                        background-color: #f4f7f9;
-                        color: #333;
-                    }
-                    .container {
-                        max-width: 1200px;
-                        margin: 0 auto;
-                        padding: 20px;
-                    }
-                    header {
-                        background-color: #2c3e50;
-                        color: white;
-                        padding: 1rem;
-                        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-                    }
-                    h1 {
-                        margin: 0;
-                        font-size: 1.8rem;
-                    }
-                    .dashboard-grid {
-                        display: grid;
-                        grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
-                        gap: 20px;
-                        margin-top: 20px;
-                    }
-                    .card {
-                        background: white;
-                        border-radius: 5px;
-                        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-                        padding: 20px;
-                        margin-bottom: 20px;
-                    }
-                    .card h2 {
-                        margin-top: 0;
-                        border-bottom: 1px solid #eee;
-                        padding-bottom: 10px;
-                        font-size: 1.3rem;
-                        color: #2c3e50;
-                    }
-                    .status-ok {
-                        color: #27ae60;
-                    }
-                    .status-warning {
-                        color: #f39c12;
-                    }
-                    .status-error {
-                        color: #e74c3c;
-                    }
-                    .metrics-table {
-                        width: 100%;
-                        border-collapse: collapse;
-                    }
-                    .metrics-table th, .metrics-table td {
-                        text-align: left;
-                        padding: 8px;
-                        border-bottom: 1px solid #eee;
-                    }
-                    .metrics-table th {
-                        font-weight: bold;
-                        color: #7f8c8d;
-                    }
-                    .log-container {
-                        background-color: #2c3e50;
-                        color: #ecf0f1;
-                        padding: 15px;
-                        border-radius: 3px;
-                        font-family: monospace;
-                        height: 300px;
-                        overflow-y: auto;
-                    }
-                    .log-line {
-                        margin: 0;
-                        padding: 2px 0;
-                        border-bottom: 1px solid #34495e;
-                    }
-                    .refresh-button {
-                        background-color: #3498db;
-                        color: white;
-                        border: none;
-                        padding: 8px 15px;
-                        border-radius: 3px;
-                        cursor: pointer;
-                        margin-bottom: 15px;
-                    }
-                    .refresh-button:hover {
-                        background-color: #2980b9;
-                    }
-                    footer {
-                        margin-top: 40px;
-                        text-align: center;
-                        color: #7f8c8d;
-                        font-size: 0.9rem;
-                    }
-                    .api-info {
-                        margin-top: 30px;
-                        background-color: #f8f9fa;
-                        padding: 15px;
-                        border-left: 4px solid #3498db;
-                    }
-                    .api-list {
-                        list-style-type: none;
-                        padding-left: 10px;
-                    }
-                    .api-list li {
-                        margin-bottom: 8px;
-                    }
-                    .api-url {
-                        font-family: monospace;
-                        background-color: #ecf0f1;
-                        padding: 3px 6px;
-                        border-radius: 3px;
-                    }
-                </style>
-            </head>
-            <body>
-                <header>
-                    <div class="container">
-                        <h1>LDB Monitoring Dashboard</h1>
-                        <p>Desi Hip-Hop Recommendation System - System Monitoring</p>
-                    </div>
-                </header>
-                
-                <div class="container">
-                    <button class="refresh-button" onclick="window.location.reload()">Refresh Dashboard</button>
-                    
-                    <div class="dashboard-grid">
-                        <div class="card">
-                            <h2>System Overview</h2>
-                            <div id="system-info">
-                                <p>Loading system information...</p>
-                            </div>
-                        </div>
-                        
-                        <div class="card">
-                            <h2>Service Status</h2>
-                            <div id="service-status">
-                                <p>Loading service status...</p>
-                            </div>
-                        </div>
-                        
-                        <div class="card">
-                            <h2>Database</h2>
-                            <div id="database-info">
-                                <p>Loading database information...</p>
-                            </div>
-                        </div>
-                        
-                        <div class="card">
-                            <h2>Health Checks</h2>
-                            <div id="health-checks">
-                                <p>Loading health check results...</p>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <h2>Recent Logs</h2>
-                        <div class="log-container" id="logs">
-                            <p>Loading logs...</p>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <h2>Application Metrics</h2>
-                        <div id="app-metrics">
-                            <p>Loading application metrics...</p>
-                        </div>
-                    </div>
-                    
-                    <div class="api-info">
-                        <h3>Available API Endpoints</h3>
-                        <ul class="api-list">
-                            <li><span class="api-url">/api/metrics</span> - Current system metrics</li>
-                            <li><span class="api-url">/api/services</span> - Service status information</li>
-                            <li><span class="api-url">/api/db</span> - Database metrics and information</li>
-                            <li><span class="api-url">/api/health</span> - Health check results</li>
-                            <li><span class="api-url">/api/logs</span> - Recent application logs</li>
-                            <li><span class="api-url">/api/errors</span> - Recent application errors</li>
-                            <li><span class="api-url">/api/system</span> - System information</li>
-                            <li><span class="api-url">/api/network</span> - Network diagnostics</li>
-                            <li><span class="api-url">/api/application/metrics</span> - Application metrics</li>
-                            <li><span class="api-url">/status</span> - Simple status check endpoint</li>
-                        </ul>
-                    </div>
-                </div>
-                
-                <footer>
-                    <div class="container">
-                        <p>LDB Monitoring Dashboard v{{ app_version }} | {{ current_time }}</p>
-                    </div>
-                </footer>
-                
-                <script>
-                    // Simple function to fetch and display data from API endpoints
-                    async function fetchData(endpoint, elementId, renderFunction) {
-                        try {
-                            const response = await fetch(endpoint);
-                            if (!response.ok) {
-                                throw new Error(`HTTP error! Status: ${response.status}`);
-                            }
-                            const data = await response.json();
-                            const element = document.getElementById(elementId);
-                            if (element && renderFunction) {
-                                element.innerHTML = renderFunction(data);
-                            }
-                        } catch (error) {
-                            console.error(`Error fetching ${endpoint}:`, error);
-                            const element = document.getElementById(elementId);
-                            if (element) {
-                                element.innerHTML = `<p class="status-error">Error loading data: ${error.message}</p>`;
-                            }
-                        }
-                    }
-                    
-                    // Render functions for different data types
-                    function renderSystemInfo(data) {
-                        return `
-                            <table class="metrics-table">
-                                <tr>
-                                    <th>Hostname</th>
-                                    <td>${data.hostname || 'Unknown'}</td>
-                                </tr>
-                                <tr>
-                                    <th>Platform</th>
-                                    <td>${data.platform || 'Unknown'}</td>
-                                </tr>
-                                <tr>
-                                    <th>Python Version</th>
-                                    <td>${data.python_version || 'Unknown'}</td>
-                                </tr>
-                                <tr>
-                                    <th>IP Address</th>
-                                    <td>${data.ip_address || 'Unknown'}</td>
-                                </tr>
-                                <tr>
-                                    <th>Started At</th>
-                                    <td>${data.started_at || 'Unknown'}</td>
-                                </tr>
-                            </table>
-                            ${data.process ? `
-                            <h3>Process Information</h3>
-                            <table class="metrics-table">
-                                <tr>
-                                    <th>PID</th>
-                                    <td>${data.process.pid}</td>
-                                </tr>
-                                <tr>
-                                    <th>CPU Usage</th>
-                                    <td>${data.process.cpu_percent}%</td>
-                                </tr>
-                                <tr>
-                                    <th>Memory (RSS)</th>
-                                    <td>${Math.round(data.process.memory_info.rss / (1024 * 1024))} MB</td>
-                                </tr>
-                                <tr>
-                                    <th>Threads</th>
-                                    <td>${data.process.threads}</td>
-                                </tr>
-                            </table>
-                            ` : ''}
-                        `;
-                    }
-                    
-                    function renderServiceStatus(data) {
-                        let html = '<table class="metrics-table"><tr><th>Service</th><th>Status</th></tr>';
-                        
-                        for (const [service, status] of Object.entries(data)) {
-                            let statusClass = 'status-ok';
-                            if (status === 'stopped' || status === 'error') {
-                                statusClass = 'status-error';
-                            } else if (status === 'starting' || status === 'stopping' || status === 'unknown') {
-                                statusClass = 'status-warning';
-                            }
-                            
-                            html += `
-                                <tr>
-                                    <td>${service}</td>
-                                    <td class="${statusClass}">${status}</td>
-                                </tr>
-                            `;
-                        }
-                        
-                        html += '</table>';
-                        return html;
-                    }
-                    
-                    function renderDatabaseInfo(data) {
-                        let statusClass = 'status-error';
-                        if (data.connection_status === 'connected') {
-                            statusClass = 'status-ok';
-                        }
-                        
-                        let html = `
-                            <p>Connection: <span class="${statusClass}">${data.connection_status}</span></p>
-                        `;
-                        
-                        if (data.tables && data.tables.length > 0) {
-                            html += '<h3>Database Tables</h3>';
-                            html += '<table class="metrics-table"><tr><th>Table</th><th>Rows</th><th>Size</th></tr>';
-                            
-                            for (const table of data.tables) {
-                                html += `
-                                    <tr>
-                                        <td>${table.name}</td>
-                                        <td>${table.rows || 'N/A'}</td>
-                                        <td>${table.size || 'N/A'}</td>
-                                    </tr>
-                                `;
-                            }
-                            
-                            html += '</table>';
-                        }
-                        
-                        if (data.slow_queries && data.slow_queries.length > 0) {
-                            html += '<h3>Slow Queries</h3>';
-                            html += '<ul>';
-                            
-                            for (const query of data.slow_queries) {
-                                html += `
-                                    <li>
-                                        <strong>${query.duration}s</strong>: ${query.query}
-                                    </li>
-                                `;
-                            }
-                            
-                            html += '</ul>';
-                        }
-                        
-                        return html;
-                    }
-                    
-                    function renderHealthChecks(data) {
-                        let html = '<table class="metrics-table"><tr><th>Check</th><th>Status</th><th>Message</th></tr>';
-                        
-                        for (const [check, info] of Object.entries(data)) {
-                            let statusClass = 'status-ok';
-                            if (info.status === 'error') {
-                                statusClass = 'status-error';
-                            } else if (info.status === 'warning') {
-                                statusClass = 'status-warning';
-                            }
-                            
-                            html += `
-                                <tr>
-                                    <td>${check}</td>
-                                    <td class="${statusClass}">${info.status}</td>
-                                    <td>${info.message}</td>
-                                </tr>
-                            `;
-                        }
-                        
-                        html += '</table>';
-                        return html;
-                    }
-                    
-                    function renderLogs(data) {
-                        if (!data || data.length === 0) {
-                            return '<p>No logs available</p>';
-                        }
-                        
-                        let html = '';
-                        for (const log of data) {
-                            let logClass = 'log-line';
-                            if (log.includes('ERROR') || log.includes('CRITICAL')) {
-                                logClass += ' status-error';
-                            } else if (log.includes('WARNING')) {
-                                logClass += ' status-warning';
-                            }
-                            
-                            html += `<pre class="${logClass}">${log}</pre>`;
-                        }
-                        
-                        return html;
-                    }
-                    
-                    function renderAppMetrics(data) {
-                        if (!data || Object.keys(data).length === 0) {
-                            return '<p>No application metrics available</p>';
-                        }
-                        
-                        let html = '<table class="metrics-table"><tr><th>Metric</th><th>Value</th><th>Type</th></tr>';
-                        
-                        for (const [metric, info] of Object.entries(data)) {
-                            const value = info.values?.default;
-                            let displayValue = '';
-                            
-                            if (info.type === 'counter' || info.type === 'gauge') {
-                                displayValue = value;
-                            } else if (info.type === 'histogram' && typeof value === 'object') {
-                                displayValue = `avg: ${value.avg}, p95: ${value.p95}`;
-                            } else {
-                                displayValue = JSON.stringify(value);
-                            }
-                            
-                            html += `
-                                <tr>
-                                    <td title="${info.description || ''}">${metric}</td>
-                                    <td>${displayValue}</td>
-                                    <td>${info.type}</td>
-                                </tr>
-                            `;
-                        }
-                        
-                        html += '</table>';
-                        return html;
-                    }
-                    
-                    // Load data when page loads
-                    document.addEventListener('DOMContentLoaded', () => {
-                        fetchData('/api/system', 'system-info', renderSystemInfo);
-                        fetchData('/api/services', 'service-status', renderServiceStatus);
-                        fetchData('/api/db', 'database-info', renderDatabaseInfo);
-                        fetchData('/api/health', 'health-checks', renderHealthChecks);
-                        fetchData('/api/logs', 'logs', renderLogs);
-                        fetchData('/api/application/metrics', 'app-metrics', renderAppMetrics);
-                    });
-                </script>
-            </body>
-            </html>
-            """
-            
-            return render_template_string(dashboard_html, 
-                                          app_version=self.config.app_version,
-                                          current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        except Exception as e:
-            logger.error(f"Error rendering dashboard template: {e}", exc_info=True)
-            return f"<h1>Dashboard Error</h1><p>Error rendering dashboard: {str(e)}</p>"
-
-    def start(self, host: str = None, port: int = None, debug: bool = False):
-        """Start the dashboard application"""
-        # Setup routes
-        self.setup_routes()
-        
-        # Start metrics collection
-        self.start_metrics_collection()
-        
-        # Use config values if parameters are not provided
-        host = host or self.config.bind_host
-        port = port or self.config.bind_port
-        
-        # Configure host binding based on allow_external setting
-        if not self.config.allow_external:
-            host = '127.0.0.1'  # Only bind to localhost if external access is disabled
-            logger.info("External access disabled, binding to localhost only")
-        
-        # Log the actual binding that will be used
-        logger.info(f"Starting dashboard on {host}:{port}" + (" (debug mode)" if debug else ""))
-        
-        # Set up authentication if in production mode
-        if not debug and host != '127.0.0.1':
-            logger.info("Authentication is disabled - no login required")
-        
-        # Log network interfaces for better diagnostics
-        for interface, addresses in self.system_info.get_info().get("network_interfaces", {}).items():
-            if addresses:
-                for addr in addresses:
-                    logger.info(f"Available network interface: {interface} - {addr.get('address', 'unknown')}")
-        
-        # Start Flask app with better error handling
-        try:
-            logger.info(f"To access the dashboard, open http://{host}:{port} in your browser")
-            logger.info(f"To check if the server is running, try: curl http://{host}:{port}/status")
-            
-            # Extra check for port availability
-            try:
-                test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                test_socket.bind((host, port))
-                logger.info(f"Port {port} is available for binding")
-                test_socket.close()
-            except OSError:
-                logger.warning(f"Port {port} may already be in use, but attempting to start anyway")
-            
-            # Start Flask app
-            self.app.run(host=host, port=port, debug=debug, threaded=True)
-        except OSError as e:
-            if "Address already in use" in str(e):
-                logger.critical(f"Port {port} is already in use. Try a different port with --port argument")
-            elif "Cannot assign requested address" in str(e):
-                logger.critical(f"Cannot bind to {host}:{port}. Try 127.0.0.1 or 0.0.0.0 as host")
+                    process = psutil.Process(self.pid)
+                    mem_info = process.memory_info()
+                    self.metrics['process_memory'].append(mem_info.rss / (1024 * 1024))  # MB
+                except psutil.NoSuchProcess:
+                    logger.warning(f"LDB process with PID {self.pid} no longer exists")
+                    self.pid = None
+                    self.metrics['process_memory'].append(0)
             else:
-                logger.critical(f"Network error starting dashboard: {str(e)}")
-            sys.exit(1)
+                self.metrics['process_memory'].append(0)
         except Exception as e:
-            logger.critical(f"Failed to start dashboard: {str(e)}")
-            sys.exit(1)
+            logger.error(f"Error monitoring LDB process: {str(e)}")
+            self.metrics['process_memory'].append(0)
     
-    def _setup_authentication(self):
-        """Authentication is disabled - this method is now a no-op"""
-        logger.info("Authentication is disabled. Dashboard will be accessible without login.")
-        # No authentication setup will be performed
-        return
-
-# Main entry point
-if __name__ == '__main__':
-    try:
-        # Parse command line arguments with improved help messages
-        import argparse
-        parser = argparse.ArgumentParser(description='LDB Monitoring Dashboard')
-        parser.add_argument('--host', default=None, 
-                           help='Host to bind to (0.0.0.0 for all interfaces, 127.0.0.1 for localhost only)')
-        parser.add_argument('--port', type=int, default=None, 
-                           help='Port to bind to (default from config or 8001)')
-        parser.add_argument('--debug', action='store_true', 
-                           help='Enable debug mode (not recommended for production)')
-        parser.add_argument('--allow-external', action='store_true',
-                           help='Allow connections from external addresses (overrides config)')
-        args = parser.parse_args()
+    def _collect_database_metrics(self):
+        """Collect metrics from the LDB database"""
+        try:
+            if os.path.exists(self.db_config['path']):
+                conn = sqlite3.connect(self.db_config['path'])
+                cursor = conn.cursor()
+                
+                # Get database size
+                cursor.execute("PRAGMA page_count")
+                page_count = cursor.fetchone()[0]
+                cursor.execute("PRAGMA page_size")
+                page_size = cursor.fetchone()[0]
+                db_size = (page_count * page_size) / (1024 * 1024)  # Size in MB
+                
+                # Add to custom events
+                self.metrics['custom_events'].append({
+                    'timestamp': datetime.datetime.now(),
+                    'type': 'database_size',
+                    'value': db_size,
+                    'unit': 'MB'
+                })
+                
+                # Check if specific tables exist and get their row counts
+                tables_to_check = ['users', 'transactions', 'logs', 'data']
+                for table in tables_to_check:
+                    try:
+                        cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                        count = cursor.fetchone()[0]
+                        self.metrics['custom_events'].append({
+                            'timestamp': datetime.datetime.now(),
+                            'type': f'table_size_{table}',
+                            'value': count,
+                            'unit': 'rows'
+                        })
+                    except sqlite3.OperationalError:
+                        # Table doesn't exist, skip
+                        pass
+                
+                conn.close()
+                
+                # Update health check status
+                self.metrics['health_check_status']['Database'] = {
+                    'status': 'OK',
+                    'details': f'Size: {db_size:.2f} MB'
+                }
+            else:
+                logger.warning(f"Database file not found: {self.db_config['path']}")
+                self.metrics['health_check_status']['Database'] = {
+                    'status': 'FAIL',
+                    'details': 'Database file not found'
+                }
+        except Exception as e:
+            logger.error(f"Error collecting database metrics: {str(e)}")
+            self.metrics['health_check_status']['Database'] = {
+                'status': 'ERROR',
+                'details': str(e)
+            }
+    
+    def _run_health_checks(self):
+        """Run health checks on all configured endpoints"""
+        for check in self.health_checks:
+            try:
+                if check.get('type') == 'database':
+                    # Database health check is handled separately
+                    continue
+                    
+                if 'url' in check:
+                    response = requests.get(check['url'], timeout=check.get('timeout', 5))
+                    
+                    if response.status_code == 200:
+                        status = "OK"
+                        details = f"Response time: {response.elapsed.total_seconds()*1000:.2f}ms"
+                    else:
+                        status = "WARN"
+                        details = f"Status code: {response.status_code}"
+                    
+                    self.metrics['health_check_status'][check['name']] = {
+                        'status': status,
+                        'details': details
+                    }
+            except requests.RequestException as e:
+                self.metrics['health_check_status'][check['name']] = {
+                    'status': 'FAIL',
+                    'details': str(e)
+                }
+    
+    def record_request(self, endpoint, response_time_ms, error=False):
+        """
+        Record a request to the system
         
-        # Create dashboard instance
-        dashboard = Dashboard()
+        Args:
+            endpoint (str): The API endpoint called
+            response_time_ms (float): Response time in milliseconds
+            error (bool): Whether request resulted in error
+        """
+        self.metrics['request_count'] += 1
+        self.metrics['response_times'].append(response_time_ms)
         
-        # Update config if command line args were provided
-        if args.allow_external:
-            dashboard.config.allow_external = True
+        if error:
+            self.metrics['error_count'] += 1
             
-        # Start dashboard
-        dashboard.start(host=args.host, port=args.port, debug=args.debug)
-    except Exception as e:
-        logger.critical(f"Failed to start dashboard: {str(e)}")
-        sys.exit(1)
+        # Check if response time exceeds threshold
+        if response_time_ms > self.alert_thresholds['response_time']:
+            alert = f"SLOW RESPONSE ALERT: {endpoint} took {response_time_ms}ms at {datetime.datetime.now()}"
+            self.alerts.append(alert)
+            logger.warning(alert)
+    
+    def record_connection(self, count):
+        """Record the number of active connections"""
+        self.metrics['active_connections'].append(count)
+    
+    def record_db_query(self, query_type, execution_time_ms):
+        """
+        Record database query execution time
+        
+        Args:
+            query_type (str): Type of query (SELECT, INSERT, etc.)
+            execution_time_ms (float): Execution time in milliseconds
+        """
+        self.metrics['db_query_times'].append({
+            'timestamp': datetime.datetime.now(),
+            'type': query_type,
+            'execution_time': execution_time_ms
+        })
+        self.metrics['db_transaction_count'] += 1
+        
+        # Check if query time is concerning
+        if execution_time_ms > 1000:  # Over 1 second
+            alert = f"SLOW DB QUERY ALERT: {query_type} took {execution_time_ms}ms at {datetime.datetime.now()}"
+            self.alerts.append(alert)
+            logger.warning(alert)
+    
+    def record_custom_event(self, event_type, value, unit=None):
+        """
+        Record a custom application event
+        
+        Args:
+            event_type (str): Type of event
+            value: Value associated with the event
+            unit (str): Unit of measurement
+        """
+        self.metrics['custom_events'].append({
+            'timestamp': datetime.datetime.now(),
+            'type': event_type,
+            'value': value,
+            'unit': unit
+        })
+    
+    def record_api_call(self, endpoint):
+        """
+        Record an API call to track most used endpoints
+        
+        Args:
+            endpoint (str): The API endpoint called
+        """
+        if endpoint not in self.metrics['api_call_count']:
+            self.metrics['api_call_count'][endpoint] = 0
+        self.metrics['api_call_count'][endpoint] += 1
+    
+    def get_summary(self):
+        """Get a summary of the current metrics"""
+        if not self.metrics['cpu_usage']:
+            return {"status": "No data available yet"}
+            
+        summary = {
+            "current_cpu": self.metrics['cpu_usage'][-1],
+            "current_memory": self.metrics['memory_usage'][-1],
+            "current_disk": self.metrics['disk_usage'][-1],
+            "request_count": self.metrics['request_count'],
+            "error_count": self.metrics['error_count'],
+            "error_rate": (self.metrics['error_count'] / max(1, self.metrics['request_count']) * 100),
+            "avg_response_time": sum(self.metrics['response_times']) / max(1, len(self.metrics['response_times'])),
+            "recent_alerts": self.alerts[-5:] if self.alerts else [],
+            "db_transaction_count": self.metrics['db_transaction_count'],
+            "health_checks": self.metrics['health_check_status'],
+            "top_api_endpoints": self._get_top_endpoints(5),
+            "process_memory_mb": self.metrics['process_memory'][-1] if self.metrics['process_memory'] else 0
+        }
+        
+        return summary
+    
+    def _get_top_endpoints(self, limit=5):
+        """Get the most frequently called API endpoints"""
+        sorted_endpoints = sorted(
+            self.metrics['api_call_count'].items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        return dict(sorted_endpoints[:limit])
+    
+    def generate_cpu_chart(self):
+        """Generate CPU usage chart as base64 string"""
+        if len(self.metrics['timestamp']) < 2:
+            return None
+            
+        plt.figure(figsize=(10, 6))
+        plt.plot(self.metrics['timestamp'], self.metrics['cpu_usage'])
+        plt.title('CPU Usage Over Time')
+        plt.ylabel('CPU Usage (%)')
+        plt.xlabel('Time')
+        plt.grid(True)
+        plt.tight_layout()
+        
+        # Convert plot to base64 string
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png')
+        buffer.seek(0)
+        image_png = buffer.getvalue()
+        buffer.close()
+        plt.close()
+        
+        return base64.b64encode(image_png).decode('utf-8')
+    
+    def generate_memory_chart(self):
+        """Generate memory usage chart as base64 string"""
+        if len(self.metrics['timestamp']) < 2:
+            return None
+            
+        plt.figure(figsize=(10, 6))
+        plt.plot(self.metrics['timestamp'], self.metrics['memory_usage'])
+        plt.title('Memory Usage Over Time')
+        plt.ylabel('Memory Usage (%)')
+        plt.xlabel('Time')
+        plt.grid(True)
+        plt.tight_layout()
+        
+        # Convert plot to base64 string
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png')
+        buffer.seek(0)
+        image_png = buffer.getvalue()
+        buffer.close()
+        plt.close()
+        
+        return base64.b64encode(image_png).decode('utf-8')
+    
+    def generate_process_memory_chart(self):
+        """Generate process memory usage chart as base64 string"""
+        if len(self.metrics['timestamp']) < 2 or len(self.metrics['process_memory']) < 2:
+            return None
+            
+        plt.figure(figsize=(10, 6))
+        plt.plot(self.metrics['timestamp'][-len(self.metrics['process_memory']):], 
+                 self.metrics['process_memory'])
+        plt.title('LDB Process Memory Usage Over Time')
+        plt.ylabel('Memory Usage (MB)')
+        plt.xlabel('Time')
+        plt.grid(True)
+        plt.tight_layout()
+        
+        # Convert plot to base64 string
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png')
+        buffer.seek(0)
+        image_png = buffer.getvalue()
+        buffer.close()
+        plt.close()
+        
+        return base64.b64encode(image_png).decode('utf-8')
+    
+    def generate_db_performance_chart(self):
+        """Generate database query performance chart as base64 string"""
+        if not self.metrics['db_query_times']:
+            return None
+        
+        # Extract data for plotting
+        timestamps = [item['timestamp'] for item in self.metrics['db_query_times']]
+        exec_times = [item['execution_time'] for item in self.metrics['db_query_times']]
+        query_types = [item['type'] for item in self.metrics['db_query_times']]
+        
+        plt.figure(figsize=(10, 6))
+        
+        # Different colors for different query types
+        colors = {'SELECT': 'blue', 'INSERT': 'green', 'UPDATE': 'orange', 'DELETE': 'red'}
+        
+        for qtype in set(query_types):
+            indices = [i for i, t in enumerate(query_types) if t == qtype]
+            plt.scatter([timestamps[i] for i in indices], 
+                       [exec_times[i] for i in indices],
+                       label=qtype,
+                       color=colors.get(qtype, 'gray'),
+                       alpha=0.7)
+        
+        plt.title('Database Query Performance')
+        plt.ylabel('Execution Time (ms)')
+        plt.xlabel('Time')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        
+        # Convert plot to base64 string
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png')
+        buffer.seek(0)
+        image_png = buffer.getvalue()
+        buffer.close()
+        plt.close()
+        
+        return base64.b64encode(image_png).decode('utf-8')
+    
+    def export_metrics_to_csv(self, filepath):
+        """Export collected metrics to CSV file"""
+        try:
+            df = pd.DataFrame({
+                'timestamp': self.metrics['timestamp'],
+                'cpu_usage': self.metrics['cpu_usage'],
+                'memory_usage': self.metrics['memory_usage'],
+                'disk_usage': self.metrics['disk_usage'],
+                'network_traffic': self.metrics['network_traffic']
+            })
+            df.to_csv(filepath, index=False)
+            logger.info(f"Metrics exported to {filepath}")
+            return True
+        except Exception as e:
+            logger.error(f"Error exporting metrics: {str(e)}")
+            return False
+
+# Create a simple web server for the dashboard
+app = Flask(__name__)
+dashboard = LDBDashboard()
+
+@app.route('/')
+def index():
+    """Render the dashboard homepage"""
+    return render_template('dashboard.html', title='LDB Monitoring Dashboard')
+
+@app.route('/api/metrics')
+def api_metrics():
+    """API endpoint to get current metrics"""
+    return jsonify(dashboard.get_summary())
+
+@app.route('/api/charts/cpu')
+def api_cpu_chart():
+    """API endpoint to get CPU chart"""
+    chart = dashboard.generate_cpu_chart()
+    return jsonify({'chart': chart})
+
+@app.route('/api/charts/memory')
+def api_memory_chart():
+    """API endpoint to get memory chart"""
+    chart = dashboard.generate_memory_chart()
+    return jsonify({'chart': chart})
+
+@app.route('/api/charts/process-memory')
+def api_process_memory_chart():
+    """API endpoint to get process memory chart"""
+    chart = dashboard.generate_process_memory_chart()
+    return jsonify({'chart': chart})
+
+@app.route('/api/charts/db-performance')
+def api_db_performance_chart():
+    """API endpoint to get database performance chart"""
+    chart = dashboard.generate_db_performance_chart()
+    return jsonify({'chart': chart})
+
+@app.route('/api/record-event', methods=['POST'])
+def api_record_event():
+    """API endpoint to record custom events from other parts of the application"""
+    data = request.json
+    if not data or 'type' not in data or 'value' not in data:
+        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    
+    dashboard.record_custom_event(
+        data['type'],
+        data['value'],
+        data.get('unit')
+    )
+    return jsonify({'status': 'success'})
+
+@app.route('/api/record-db-query', methods=['POST'])
+def api_record_db_query():
+    """API endpoint to record database query metrics"""
+    data = request.json
+    if not data or 'query_type' not in data or 'execution_time' not in data:
+        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    
+    dashboard.record_db_query(
+        data['query_type'],
+        data['execution_time']
+    )
+    return jsonify({'status': 'success'})
+
+@app.route('/health')
+def health_check():
+    """Health check endpoint for the dashboard itself"""
+    return jsonify({
+        'status': 'OK',
+        'timestamp': datetime.datetime.now().isoformat(),
+        'version': '1.0'
+    })
+
+def run_dashboard_server(host='0.0.0.0', port=5000, debug=False):
+    """Run the dashboard web server"""
+    dashboard.start_monitoring()
+    app.run(host=host, port=port, debug=debug)
+
+if __name__ == "__main__":
+    # Create log directory if it doesn't exist
+    log_dir = os.path.dirname("e:\\LDB\\logs\\dashboard.log")
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    # Start the dashboard monitoring with configuration
+    config_path = "e:\\LDB\\config\\dashboard_config.json"
+    dashboard = LDBDashboard(update_interval=5, config_file=config_path)
+    dashboard.start_monitoring()
+    app.run(host='0.0.0.0', port=5000, debug=True)
