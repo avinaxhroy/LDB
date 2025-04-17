@@ -1638,6 +1638,13 @@ class Dashboard:
             # Add a warning for HTTP Basic Auth security considerations
             logger.warning("WARNING: Basic authentication is being used over HTTP. Consider using HTTPS or a reverse proxy")
             
+            # Print credentials information to make it easy for users to log in
+            print("\n" + "="*80)
+            print(f"DASHBOARD AUTHENTICATION REQUIRED")
+            print(f"Username: {admin_user}")
+            print(f"Password: {admin_password}")
+            print("="*80 + "\n")
+            
         except Exception as e:
             logger.error(f"Failed to set up authentication: {e}", exc_info=True)
             logger.warning("Dashboard will run without authentication - THIS IS INSECURE")
