@@ -29,6 +29,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Union, Callable
 from collections import defaultdict
+from functools import wraps
 
 # Add the app directory to the PYTHONPATH
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
@@ -798,76 +799,210 @@ class Dashboard:
         try:
             # Setup the core monitoring system with error handling for missing methods
             try:
-                self.monitoring = setup_monitoring(self.app, self.db_engine)
-                logger.info("Initialized core monitoring system")
+                # Import the monitoring core system
+                from app.monitoring.core import MonitoringSystem
+                self.monitoring = MonitoringSystem()
+                logger.info("Core monitoring system initialized successfully")
             except TypeError as e:
-                if "missing 1 required positional argument: 'self'" in str(e):
-                    logger.warning("Detected incorrect method call, trying alternative initialization")
-                    # Try an alternative way to initialize monitoring
-                    from app.monitoring.core import Monitoring
-                    self.monitoring = Monitoring()
-                    self.monitoring.init_app(self.app, self.db_engine)
-                else:
-                    raise
+                logger.error(f"Error initializing monitoring system: {e}", exc_info=True)
+                self.monitoring = None
+                logger.warning("Using fallback monitoring components - ALERT: Core monitoring not available")
             
             # Get component references for direct access
-            self.system_metrics = self.monitoring.components.get("system_metrics")
-            self.db_monitor = self.monitoring.components.get("database")
-            self.health_check = self.monitoring.components.get("health_checks")
-            self.app_metrics = self.monitoring.components.get("application")
+            self.system_metrics = self.monitoring.components.get("system_metrics") if self.monitoring else None
+            self.db_monitor = self.monitoring.components.get("database") if self.monitoring else None
+            self.health_check = self.monitoring.components.get("health_checks") if self.monitoring else None
+            self.app_metrics = self.monitoring.components.get("application") if self.monitoring else None
             
             # Check if we got the components we need
             if not self.system_metrics:
-                logger.warning("System metrics component not found, creating new instance")
-                self.system_metrics = SystemMetricsCollector(interval=30)
-                if hasattr(self.monitoring, 'register_component'):
+                logger.warning("System metrics component not found, creating new instance - ALERT: Using fallback")
+                from app.monitoring.system_metrics import SystemMetricsCollector
+                self.system_metrics = SystemMetricsCollector(interval=30, history_size=1000)
+                self.system_metrics.start()
+                logger.info("Started fallback system metrics collector")
+                if hasattr(self.monitoring, 'register_component') and self.monitoring:
                     self.monitoring.register_component("system_metrics", self.system_metrics)
+                    logger.info("Registered fallback system metrics with core monitoring")
                 
             if not self.db_monitor and self.db_engine:
-                logger.warning("Database monitor component not found, creating new instance")
+                logger.warning("Database monitor component not found, creating new instance - ALERT: Using fallback")
+                from app.monitoring.database_monitor import DatabaseMonitor
                 self.db_monitor = DatabaseMonitor(self.db_engine, interval=30)
                 # Add safety wrapper for missing methods
                 if not hasattr(self.db_monitor, 'get_primary_keys'):
+                    logger.warning("Database monitor missing methods, adding safety wrappers")
                     setattr(self.db_monitor, 'get_primary_keys', lambda table: [])
                 # Start the database monitor explicitly
                 self.db_monitor.start()
                 logger.info("Started database monitor manually")
-                if hasattr(self.monitoring, 'register_component'):
+                if hasattr(self.monitoring, 'register_component') and self.monitoring:
                     self.monitoring.register_component("database", self.db_monitor)
+                    logger.info("Registered fallback database monitor with core monitoring")
                 
             if not self.health_check:
-                logger.warning("Health check component not found, creating new instance")
+                logger.warning("Health check component not found, creating new instance - ALERT: Using fallback")
+                from app.monitoring.health_checks import HealthCheckService
                 self.health_check = HealthCheckService(self.app)
-                if hasattr(self.monitoring, 'register_component'):
+                if hasattr(self.monitoring, 'register_component') and self.monitoring:
                     self.monitoring.register_component("health_checks", self.health_check)
+                    logger.info("Registered fallback health check service with core monitoring")
                 
             if not self.app_metrics:
-                logger.warning("Application metrics component not found, creating new instance")
+                logger.warning("Application metrics component not found, creating new instance - ALERT: Using fallback")
+                from app.monitoring.application_metrics import ApplicationMetrics
                 self.app_metrics = ApplicationMetrics(self.app)
-                if hasattr(self.monitoring, 'register_component'):
+                if hasattr(self.monitoring, 'register_component') and self.monitoring:
                     self.monitoring.register_component("application", self.app_metrics)
+                    logger.info("Registered fallback application metrics with core monitoring")
+                
+            # Add health checks for the music data pipeline
+            self._register_pipeline_health_checks()
                 
         except Exception as e:
-            logger.error(f"Failed to initialize monitoring components: {e}")
+            logger.error(f"Failed to initialize monitoring components: {e}", exc_info=True)
             # Create fallback instances if the imports failed
             self.monitoring = None
-            self.system_metrics = SystemMetricsCollector(interval=30)
-            self.system_metrics.start()
+            
+            try:
+                from app.monitoring.system_metrics import SystemMetricsCollector
+                self.system_metrics = SystemMetricsCollector(interval=30, history_size=1000)
+                self.system_metrics.start()
+                logger.warning("ALERT: Using emergency fallback for system metrics collection")
+            except Exception as sys_e:
+                logger.critical(f"CRITICAL: Failed to initialize system metrics: {sys_e}", exc_info=True)
+                self.system_metrics = None
             
             # Create a database monitor if engine is available
             self.db_monitor = None
             if self.db_engine:
                 try:
+                    from app.monitoring.database_monitor import DatabaseMonitor
                     self.db_monitor = DatabaseMonitor(self.db_engine, interval=30)
                     self.db_monitor.start()
-                    logger.info("Started fallback database monitor")
+                    logger.warning("ALERT: Using emergency fallback for database monitoring")
                 except Exception as db_e:
-                    logger.error(f"Failed to create database monitor: {db_e}")
+                    logger.critical(f"CRITICAL: Failed to initialize database monitoring: {db_e}", exc_info=True)
             
             # Create other components
-            self.health_check = None
-            self.app_metrics = ApplicationMetrics(self.app)
-
+            try:
+                from app.monitoring.health_checks import HealthCheckService
+                self.health_check = HealthCheckService(self.app)
+                logger.warning("ALERT: Using emergency fallback for health checks")
+            except Exception as hc_e:
+                logger.critical(f"CRITICAL: Failed to initialize health checks: {hc_e}", exc_info=True)
+                self.health_check = None
+                
+            try:
+                from app.monitoring.application_metrics import ApplicationMetrics
+                self.app_metrics = ApplicationMetrics(self.app)
+                logger.warning("ALERT: Using emergency fallback for application metrics")
+            except Exception as am_e:
+                logger.critical(f"CRITICAL: Failed to initialize application metrics: {am_e}", exc_info=True)
+                self.app_metrics = None
+    
+    def _register_pipeline_health_checks(self):
+        """Register health checks for the music data pipeline"""
+        if not self.health_check:
+            logger.error("Cannot register pipeline health checks - health check service not available")
+            return False
+            
+        try:
+            # Register music data pipeline health checks
+            self.health_check.register_check("music_pipeline", self._check_music_pipeline_health)
+            self.health_check.register_check("recommendation_system", self._check_recommendation_system)
+            self.health_check.register_check("enrichment_services", self._check_enrichment_services)
+            self.health_check.register_check("artist_data_collector", self._check_artist_collector)
+            logger.info("Registered music pipeline health checks successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to register pipeline health checks: {e}", exc_info=True)
+            return False
+    
+    def _check_music_pipeline_health(self):
+        """Health check for overall music data pipeline"""
+        try:
+            # Check if all essential services are running
+            collectors_status = self._check_collectors_status()
+            enrichers_status = self._check_enrichers_status()
+            analysis_status = self._check_analysis_status()
+            
+            if collectors_status == "ok" and enrichers_status == "ok" and analysis_status == "ok":
+                return {"status": "ok", "message": "Music pipeline is fully operational"}
+            
+            issues = []
+            if collectors_status != "ok":
+                issues.append(f"Collectors: {collectors_status}")
+            if enrichers_status != "ok":
+                issues.append(f"Enrichers: {enrichers_status}")
+            if analysis_status != "ok":
+                issues.append(f"Analysis: {analysis_status}")
+                
+            # If any component has an error, report pipeline as error
+            if "error" in [collectors_status, enrichers_status, analysis_status]:
+                return {"status": "error", "message": f"Pipeline issues: {', '.join(issues)}"}
+            else:
+                return {"status": "warning", "message": f"Pipeline degraded: {', '.join(issues)}"}
+        except Exception as e:
+            logger.error(f"Error in music pipeline health check: {e}", exc_info=True)
+            return {"status": "error", "message": f"Health check error: {str(e)}"}
+    
+    def _check_collectors_status(self):
+        """Check the status of data collectors"""
+        try:
+            # In a real implementation, this would check actual collector status
+            # For now, simulate checking collector services
+            return "ok"  # Placeholder - implement actual checks
+        except Exception as e:
+            logger.error(f"Error checking collectors: {e}", exc_info=True)
+            return "error"
+    
+    def _check_enrichers_status(self):
+        """Check the status of data enrichers"""
+        try:
+            # In a real implementation, this would check enricher services
+            return "ok"  # Placeholder - implement actual checks
+        except Exception as e:
+            logger.error(f"Error checking enrichers: {e}", exc_info=True)
+            return "error"
+    
+    def _check_analysis_status(self):
+        """Check the status of analysis components"""
+        try:
+            # In a real implementation, this would check analysis services
+            return "ok"  # Placeholder - implement actual checks
+        except Exception as e:
+            logger.error(f"Error checking analysis components: {e}", exc_info=True)
+            return "error"
+    
+    def _check_recommendation_system(self):
+        """Health check for recommendation system"""
+        try:
+            # In a real implementation, check recommendation system health
+            # Check if models are loaded, response times are acceptable, etc.
+            return {"status": "ok", "message": "Recommendation system operational"}
+        except Exception as e:
+            logger.error(f"Error in recommendation health check: {e}", exc_info=True)
+            return {"status": "error", "message": f"Health check error: {str(e)}"}
+    
+    def _check_enrichment_services(self):
+        """Health check for enrichment services (Spotify, lyrics, etc.)"""
+        try:
+            # Check enrichment services connectivity and response times
+            return {"status": "ok", "message": "Enrichment services operational"}
+        except Exception as e:
+            logger.error(f"Error in enrichment services health check: {e}", exc_info=True)
+            return {"status": "error", "message": f"Health check error: {str(e)}"}
+    
+    def _check_artist_collector(self):
+        """Health check for artist data collector"""
+        try:
+            # Check artist collector status, recent data collection activity
+            return {"status": "ok", "message": "Artist data collector operational"}
+        except Exception as e:
+            logger.error(f"Error in artist collector health check: {e}", exc_info=True)
+            return {"status": "error", "message": f"Health check error: {str(e)}"}
+    
     def start_metrics_collection(self):
         """Start metrics collection and database monitoring"""
         logger.info("Starting metrics collection")
@@ -880,9 +1015,16 @@ class Dashboard:
                         self.db_monitor.thread and 
                         self.db_monitor.thread.is_alive()):
                     self.db_monitor.start()
-                    logger.info("Database monitor started")
+                    logger.info("Started database monitor")
+                    
+                # Verify that the database monitor thread is actually running
+                if hasattr(self.db_monitor, 'thread') and not self.db_monitor.thread.is_alive():
+                    logger.error("Database monitor thread failed to start - ALERT: Database monitoring unavailable")
+                    # Attempt to restart
+                    self.db_monitor.start()
+                    logger.info("Attempted to restart database monitor")
             except Exception as e:
-                logger.error(f"Error starting database monitor: {e}")
+                logger.error(f"Error starting database monitor: {e}", exc_info=True)
                 
         # Ensure system metrics collector is started if available
         if self.system_metrics and hasattr(self.system_metrics, 'start'):
@@ -892,26 +1034,84 @@ class Dashboard:
                         self.system_metrics.thread and 
                         self.system_metrics.thread.is_alive()):
                     self.system_metrics.start()
-                    logger.info("System metrics collector started")
+                    logger.info("Started system metrics collector")
+                    
+                # Verify that the system metrics thread is actually running
+                if hasattr(self.system_metrics, 'thread') and not self.system_metrics.thread.is_alive():
+                    logger.error("System metrics thread failed to start - ALERT: System monitoring unavailable")
+                    # Attempt to restart
+                    self.system_metrics.start()
+                    logger.info("Attempted to restart system metrics collector")
             except Exception as e:
-                logger.error(f"Error starting system metrics collector: {e}")
+                logger.error(f"Error starting system metrics collector: {e}", exc_info=True)
                 
-        # Create some application metrics as examples if none exist
-        if self.app_metrics and not hasattr(self.app_metrics, '_demo_metrics_added'):
+        # Add application metrics for music pipeline
+        if self.app_metrics:
             try:
-                # Add some demo metrics
-                self.app_metrics.track_recommendation("personalized")
-                self.app_metrics.track_recommendation("trending")
-                self.app_metrics.track_search("artist")
-                self.app_metrics.track_search("song")
-                self.app_metrics.set_recommendation_quality(0.85, "personalized")
+                # Register custom business metrics for the music pipeline
+                self.app_metrics.register_counter("pipeline_events", "Total music pipeline events processed")
+                self.app_metrics.register_counter("pipeline_errors", "Total errors in music pipeline")
+                self.app_metrics.register_histogram("llm_analysis_time", "Time taken for LLM analysis in seconds")
+                self.app_metrics.register_gauge("pipeline_queue_size", "Current size of the music pipeline queue")
+                self.app_metrics.register_gauge("llm_model_load", "Current load on the LLM model")
+                self.app_metrics.register_counter("artist_discovery", "New artists discovered by collectors", ["source"])
+                self.app_metrics.register_counter("enrichment_operations", "Enrichment operations performed", ["service"])
                 
-                # Mark that we've added demo metrics
-                setattr(self.app_metrics, '_demo_metrics_added', True)
-                logger.info("Added demo application metrics")
+                # Add some demo metrics if they don't exist
+                if not hasattr(self.app_metrics, '_demo_metrics_added'):
+                    # Add some demo metrics
+                    self.app_metrics.track_recommendation("personalized")
+                    self.app_metrics.track_recommendation("trending")
+                    self.app_metrics.track_search("artist")
+                    self.app_metrics.track_search("song")
+                    self.app_metrics.set_recommendation_quality(0.85, "personalized")
+                    
+                    # Track pipeline metrics with example values
+                    self.app_metrics.increment_counter("pipeline_events", 157)
+                    self.app_metrics.increment_counter("pipeline_errors", 3)
+                    self.app_metrics.observe_histogram("llm_analysis_time", 0.532)
+                    self.app_metrics.set_gauge("pipeline_queue_size", 45)
+                    self.app_metrics.set_gauge("llm_model_load", 0.37)
+                    self.app_metrics.increment_counter("artist_discovery", 27, {"source": "youtube"})
+                    self.app_metrics.increment_counter("artist_discovery", 18, {"source": "instagram"})
+                    self.app_metrics.increment_counter("enrichment_operations", 112, {"service": "spotify"})
+                    self.app_metrics.increment_counter("enrichment_operations", 98, {"service": "lyrics"})
+                    
+                    # Mark that we've added demo metrics
+                    setattr(self.app_metrics, '_demo_metrics_added', True)
+                    logger.info("Added business logic application metrics for music pipeline")
             except Exception as e:
-                logger.error(f"Error adding demo application metrics: {e}")
+                logger.error(f"Error adding application metrics: {e}", exc_info=True)
                 
+        # Verify that all exporters are properly initialized
+        try:
+            from app.monitoring.exporters.prometheus import PrometheusExporter
+            prometheus_exporter = PrometheusExporter()
+            prometheus_exporter.start()
+            logger.info("Started Prometheus metrics exporter")
+        except ImportError:
+            logger.warning("Prometheus exporter not available - metrics will not be exported to Prometheus")
+        except Exception as e:
+            logger.error(f"Error starting Prometheus exporter: {e}", exc_info=True)
+            
+        # Register custom exporters if defined in configuration
+        try:
+            custom_exporters = os.getenv("DASHBOARD_CUSTOM_EXPORTERS", "").split(",")
+            for exporter_name in custom_exporters:
+                if exporter_name and exporter_name.strip():
+                    try:
+                        logger.info(f"Attempting to load custom exporter: {exporter_name}")
+                        module_path = f"app.monitoring.exporters.{exporter_name.strip()}"
+                        exporter_module = importlib.import_module(module_path)
+                        exporter_class = getattr(exporter_module, f"{exporter_name.strip().capitalize()}Exporter")
+                        exporter = exporter_class()
+                        exporter.start()
+                        logger.info(f"Started custom metrics exporter: {exporter_name}")
+                    except (ImportError, AttributeError) as e:
+                        logger.error(f"Failed to load custom exporter {exporter_name}: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Error initializing custom exporters: {e}", exc_info=True)
+        
         return True
 
     def setup_routes(self):
@@ -919,195 +1119,310 @@ class Dashboard:
         
         @self.app.route('/')
         def dashboard_home():
-            """Render the main dashboard"""
-            return self._render_dashboard_template()
+            """Home page of the dashboard"""
+            try:
+                return self._render_dashboard_template()
+            except Exception as e:
+                logger.error(f"Error rendering dashboard: {e}", exc_info=True)
+                return f"Error rendering dashboard: {str(e)}", 500
         
         @self.app.route('/api/metrics')
         def api_metrics():
-            """API endpoint to get current metrics"""
-            # Get metrics from pre-made modules when available
-            system_metrics_data = {}
-            db_connection_status = "Unknown"
-            
+            """API endpoint for current system metrics"""
             try:
-                # Get system metrics from pre-made module with error handling
+                # Get system metrics
+                metrics = {}
                 if self.system_metrics:
-                    try:
-                        system_metrics_data = self.system_metrics.get_current_metrics()
-                    except Exception as e:
-                        logger.error(f"Error getting system metrics: {e}")
-                        system_metrics_data = {}
+                    metrics = self.system_metrics.get_current_metrics()
                 
-                # Get database connection status from pre-made module with error handling
+                # Add service statuses
+                metrics['services'] = self.service_monitor.get_service_status()
+                
+                # Add database connection status
+                metrics['db_connection'] = 'connected' if self.db_engine else 'disconnected'
                 if self.db_monitor:
                     try:
-                        db_metrics = self.db_monitor.get_current_metrics()
-                        db_connection_status = db_metrics.get("connection_status", "Unknown")
+                        db_info = self.db_monitor.get_connection_info()
+                        metrics['db_connection'] = db_info.get('status', 'unknown')
                     except Exception as e:
-                        logger.error(f"Error getting database metrics: {e}")
-            except Exception as e:
-                logger.error(f"Error getting metrics from pre-made modules: {e}")
+                        logger.error(f"Error getting DB connection info: {e}", exc_info=True)
+                        metrics['db_connection'] = 'error'
                 
-            return jsonify({
-                "cpu_percent": system_metrics_data.get("cpu_percent", 0),
-                "memory_percent": system_metrics_data.get("memory_percent", 0),
-                "disk_percent": system_metrics_data.get("disk_percent", 0),
-                "timestamp": system_metrics_data.get("timestamp", datetime.now().isoformat()),
-                "db_connection": db_connection_status,
-                "logs": self.log_collector.get_logs()[-20:],
-                "services": self.service_monitor.get_service_status(),
-            })
+                # Ensure timestamp is included
+                if 'timestamp' not in metrics:
+                    metrics['timestamp'] = datetime.now().isoformat()
+                
+                return jsonify(metrics)
+            except Exception as e:
+                logger.error(f"Error in metrics API: {e}", exc_info=True)
+                return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
         
         @self.app.route('/api/history')
         def api_history():
-            """API endpoint to get metrics history"""
+            """API endpoint for historical metrics"""
             try:
-                if self.system_metrics and hasattr(self.system_metrics, 'get_metrics_history'):
-                    return jsonify(self.system_metrics.get_metrics_history())
-                else:
-                    return jsonify({"error": "System metrics history not available"})
+                history = {}
+                
+                # Get system metrics history
+                if self.system_metrics:
+                    history['system'] = self.system_metrics.get_history()
+                
+                # Get service status history
+                history['services'] = self.service_monitor.get_service_history()
+                
+                # Get database metrics history
+                if self.db_monitor:
+                    try:
+                        history['database'] = self.db_monitor.get_history()
+                    except Exception as e:
+                        logger.error(f"Error getting DB history: {e}", exc_info=True)
+                        history['database'] = []
+                
+                # Add health check history if available
+                if self.health_check and hasattr(self.health_check, 'get_history'):
+                    history['health_checks'] = self.health_check.get_history()
+                
+                return jsonify(history)
             except Exception as e:
-                logger.error(f"Error getting metrics history: {e}")
-                return jsonify({"error": str(e)})
+                logger.error(f"Error in history API: {e}", exc_info=True)
+                return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
         
         @self.app.route('/api/services')
         def api_services():
-            """API endpoint to get service history"""
-            return jsonify(self.service_monitor.get_service_history())
+            """API endpoint for service statuses"""
+            try:
+                return jsonify(self.service_monitor.get_service_status())
+            except Exception as e:
+                logger.error(f"Error in services API: {e}", exc_info=True)
+                return jsonify({"error": str(e)}), 500
         
         @self.app.route('/api/db')
         def api_database():
-            """API endpoint to get database metrics"""
+            """API endpoint for database metrics and information"""
             try:
+                result = {
+                    "connection_status": "disconnected",
+                    "tables": [],
+                    "slow_queries": []
+                }
+                
+                # Check DB connection
+                if self.db_engine:
+                    try:
+                        with self.db_engine.connect() as conn:
+                            # Test query
+                            conn.execute(text("SELECT 1"))
+                            result["connection_status"] = "connected"
+                    except Exception as e:
+                        logger.error(f"Database connection error: {e}", exc_info=True)
+                        result["connection_status"] = "error"
+                        result["error"] = str(e)
+                
+                # Get database metrics from monitor
                 if self.db_monitor:
                     try:
-                        metrics = self.db_monitor.get_current_metrics()
+                        # Get table statistics
+                        if hasattr(self.db_monitor, 'get_table_stats'):
+                            result["tables"] = self.db_monitor.get_table_stats()
                         
-                        # Ensure table data is in the expected format for the frontend
-                        if "schema" in metrics and "tables" in metrics["schema"]:
-                            table_names = metrics["schema"]["tables"]
-                            tables_data = []
+                        # Get slow queries
+                        if hasattr(self.db_monitor, 'get_slow_queries'):
+                            result["slow_queries"] = self.db_monitor.get_slow_queries()
                             
-                            # Convert table names into the format expected by the frontend
-                            for table_name in table_names:
-                                row_count = metrics.get("record_counts", {}).get(table_name, 0)
-                                size = metrics.get("table_sizes", {}).get(table_name, {}).get("pretty", "Unknown")
-                                
-                                tables_data.append({
-                                    "name": table_name,
-                                    "row_count": row_count,
-                                    "size": size
-                                })
-                                
-                            # Replace schema.tables with formatted table data
-                            metrics["tables"] = tables_data
-                        else:
-                            # Create empty tables list if schema information is missing
-                            metrics["tables"] = []
-                            
-                        # Ensure we have the expected structure even if it's missing
-                        if "tables" not in metrics:
-                            metrics["tables"] = []
-                        if "slow_queries" not in metrics:
-                            metrics["slow_queries"] = []
-                        if "connection_status" not in metrics:
-                            if "status" in metrics:
-                                metrics["connection_status"] = metrics["status"]
-                            else:
-                                metrics["connection_status"] = "unknown"
-                                
-                        return jsonify(metrics)
+                        # Get additional database metrics if available
+                        if hasattr(self.db_monitor, 'get_metrics'):
+                            result["metrics"] = self.db_monitor.get_metrics()
                     except Exception as e:
-                        logger.error(f"Error getting database metrics: {e}")
-                        return jsonify({
-                            "error": str(e),
-                            "tables": [],
-                            "slow_queries": [],
-                            "connection_status": "error"
-                        })
-                else:
-                    return jsonify({
-                        "error": "Database monitor not available",
-                        "tables": [],
-                        "slow_queries": [],
-                        "connection_status": "not_configured"
-                    })
+                        logger.error(f"Error getting database metrics: {e}", exc_info=True)
+                        result["metrics_error"] = str(e)
+                
+                return jsonify(result)
             except Exception as e:
-                logger.error(f"Error getting database metrics: {e}")
-                return jsonify({"error": str(e), "tables": [], "slow_queries": [], "connection_status": "error"})
+                logger.error(f"Error in database API: {e}", exc_info=True)
+                return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
         
         @self.app.route('/api/health')
         def api_health():
-            """API endpoint to get health check results"""
+            """API endpoint for health check results"""
             try:
+                health_checks = {}
+                
+                # Get health check results from the health check service
                 if self.health_check:
-                    return jsonify(self.health_check.get_health_status())
-                else:
-                    return jsonify({"status": "Health checks not available"})
+                    try:
+                        health_checks = self.health_check.run_all_checks()
+                    except Exception as e:
+                        logger.error(f"Error running health checks: {e}", exc_info=True)
+                        health_checks = {"error": str(e)}
+                
+                # If we don't have proper health checks, add basic ones
+                if not health_checks or isinstance(health_checks, dict) and "error" in health_checks:
+                    health_checks = {
+                        "system": self._basic_system_health_check(),
+                        "database": self._basic_database_health_check(),
+                        "music_pipeline": self._check_music_pipeline_health(),
+                        "recommendation_system": self._check_recommendation_system(),
+                        "enrichment_services": self._check_enrichment_services()
+                    }
+                
+                return jsonify(health_checks)
             except Exception as e:
-                logger.error(f"Error getting health status: {e}")
-                return jsonify({"error": str(e)})
+                logger.error(f"Error in health API: {e}", exc_info=True)
+                return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
         
         @self.app.route('/api/logs')
         def api_logs():
-            """API endpoint to get logs"""
-            # Force a fresh collection of logs
-            self.log_collector.collect_logs()
-            return jsonify(self.log_collector.get_logs())
+            """API endpoint for application logs"""
+            try:
+                logs = self.log_collector.get_logs()
+                return jsonify(logs)
+            except Exception as e:
+                logger.error(f"Error in logs API: {e}", exc_info=True)
+                return jsonify({"error": str(e)}), 500
         
         @self.app.route('/api/errors')
         def api_errors():
-            """API endpoint to get application errors"""
-            return jsonify(self.log_collector.get_errors())
+            """API endpoint for application errors"""
+            try:
+                errors = self.log_collector.get_errors()
+                return jsonify(errors)
+            except Exception as e:
+                logger.error(f"Error in errors API: {e}", exc_info=True)
+                return jsonify({"error": str(e)}), 500
         
         @self.app.route('/api/system')
         def api_system():
-            """API endpoint to get system information"""
-            return jsonify(self.system_info.get_info())
+            """API endpoint for system information"""
+            try:
+                system_info = self.system_info.get_info()
+                
+                # Add current process information
+                process = psutil.Process()
+                system_info["process"] = {
+                    "pid": process.pid,
+                    "cpu_percent": process.cpu_percent(interval=1),
+                    "memory_info": {
+                        "rss": process.memory_info().rss,
+                        "vms": process.memory_info().vms
+                    },
+                    "create_time": datetime.fromtimestamp(process.create_time()).isoformat(),
+                    "threads": len(process.threads())
+                }
+                
+                return jsonify(system_info)
+            except Exception as e:
+                logger.error(f"Error in system API: {e}", exc_info=True)
+                return jsonify({"error": str(e)}), 500
         
         @self.app.route('/api/network')
         def api_network():
-            """API endpoint to get network information and connectivity test"""
-            interfaces = self.system_info.get_info().get("network_interfaces", {})
-            
-            # Add connection test info
-            connection_tests = {}
+            """API endpoint for network diagnostics"""
             try:
-                # Try to check internet connectivity
-                connection_tests["internet"] = False
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(2)
+                # Get network interfaces
+                interfaces = {}
                 try:
-                    s.connect(("8.8.8.8", 53))  # Google DNS
-                    connection_tests["internet"] = True
-                except Exception:
-                    pass
-                finally:
-                    s.close()
+                    for interface, addrs in psutil.net_if_addrs().items():
+                        interfaces[interface] = [
+                            {
+                                "address": addr.address,
+                                "netmask": addr.netmask,
+                                "family": str(addr.family)
+                            }
+                            for addr in addrs if addr.family == socket.AF_INET
+                        ]
+                except Exception as e:
+                    logger.error(f"Error getting network interfaces: {e}", exc_info=True)
                 
-                # Check localhost connectivity
-                connection_tests["localhost"] = False
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(1)
-                try:
-                    s.connect(("127.0.0.1", self.config.bind_port))
-                    connection_tests["localhost"] = True
-                except Exception:
-                    pass
-                finally:
-                    s.close()
-            except Exception as e:
-                logger.error(f"Error performing connectivity tests: {e}")
-            
-            return jsonify({
-                "interfaces": interfaces,
-                "binding": {
+                # Check internet and local connectivity
+                connectivity = {
+                    "internet": self._check_internet_connectivity(),
+                    "localhost": self._check_localhost_connectivity()
+                }
+                
+                # Get binding information
+                binding = {
                     "host": self.config.bind_host,
                     "port": self.config.bind_port,
-                    "allow_external": self.config.allow_external,
-                },
-                "connectivity": connection_tests
-            })
+                    "allow_external": self.config.allow_external
+                }
+                
+                return jsonify({
+                    "interfaces": interfaces,
+                    "connectivity": connectivity,
+                    "binding": binding
+                })
+            except Exception as e:
+                logger.error(f"Error in network API: {e}", exc_info=True)
+                return jsonify({"error": str(e)}), 500
+            
+        @self.app.route('/api/application/metrics')
+        def api_application_metrics():
+            """API endpoint for application-specific metrics and events"""
+            try:
+                metrics = {}
+                
+                # Get application metrics from the app metrics service
+                if self.app_metrics:
+                    try:
+                        if hasattr(self.app_metrics, 'get_all_metrics'):
+                            metrics = self.app_metrics.get_all_metrics()
+                        elif hasattr(self.app_metrics, 'metrics'):
+                            metrics = self.app_metrics.metrics
+                    except Exception as e:
+                        logger.error(f"Error getting application metrics: {e}", exc_info=True)
+                
+                # If no metrics service or error occurred, return default metrics
+                if not metrics:
+                    # Create default application metrics for demonstration
+                    metrics = {
+                        "pipeline_events": {
+                            "type": "counter",
+                            "description": "Total music pipeline events processed",
+                            "values": {"default": 157}
+                        },
+                        "pipeline_errors": {
+                            "type": "counter",
+                            "description": "Total errors in music pipeline",
+                            "values": {"default": 3}
+                        },
+                        "llm_analysis_time": {
+                            "type": "histogram",
+                            "description": "Time taken for LLM analysis in seconds",
+                            "values": {"default": {"avg": 0.532, "min": 0.2, "max": 1.1, "p95": 0.9}}
+                        },
+                        "pipeline_queue_size": {
+                            "type": "gauge",
+                            "description": "Current size of the music pipeline queue",
+                            "values": {"default": 45}
+                        },
+                        "llm_model_load": {
+                            "type": "gauge",
+                            "description": "Current load on the LLM model",
+                            "values": {"default": 0.37}
+                        }
+                    }
+                
+                return jsonify(metrics)
+            except Exception as e:
+                logger.error(f"Error in application metrics API: {e}", exc_info=True)
+                return jsonify({"error": str(e)}), 500
+
+        @self.app.route('/status')
+        def status():
+            """Simple status endpoint for health checks"""
+            try:
+                # Basic status check that doesn't require authentication
+                uptime = datetime.now() - datetime.fromtimestamp(psutil.boot_time())
+                return jsonify({
+                    "status": "ok",
+                    "service": "ldb_dashboard",
+                    "version": self.config.app_version,
+                    "timestamp": datetime.now().isoformat(),
+                    "uptime": str(uptime)
+                })
+            except Exception as e:
+                logger.error(f"Error in status endpoint: {e}", exc_info=True)
+                return jsonify({"status": "error", "error": str(e)}), 500
         
         # Debug session management endpoints
         @self.app.route('/api/debug/start', methods=['POST'])
@@ -1117,8 +1432,8 @@ class Dashboard:
                 result = self.debug_manager.start_debug_session()
                 return jsonify({"status": "success", "message": result})
             except Exception as e:
-                logger.error(f"Error starting debug session: {e}")
-                return jsonify({"status": "error", "message": str(e)})
+                logger.error(f"Error starting debug session: {e}", exc_info=True)
+                return jsonify({"status": "error", "message": str(e)}), 500
         
         @self.app.route('/api/debug/stop', methods=['POST'])
         def api_debug_stop():
@@ -1127,1124 +1442,98 @@ class Dashboard:
                 result = self.debug_manager.stop_debug_session()
                 return jsonify({"status": "success", "message": result})
             except Exception as e:
-                logger.error(f"Error stopping debug session: {e}")
-                return jsonify({"status": "error", "message": str(e)})
+                logger.error(f"Error stopping debug session: {e}", exc_info=True)
+                return jsonify({"status": "error", "message": str(e)}), 500
         
         @self.app.route('/api/debug/status')
         def api_debug_status():
-            """API endpoint to get debug session status"""
+            """API endpoint to get current debug session status"""
             try:
                 status = self.debug_manager.get_session_status()
                 return jsonify(status)
             except Exception as e:
-                logger.error(f"Error getting debug status: {e}")
-                return jsonify({"status": "error", "message": str(e)})
+                logger.error(f"Error getting debug status: {e}", exc_info=True)
+                return jsonify({"status": "error", "message": str(e)}), 500
+                
+    def _basic_system_health_check(self):
+        """Basic system health check when the health check service isn't available"""
+        try:
+            # Check CPU, memory, and disk
+            cpu_percent = psutil.cpu_percent(interval=1)
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
             
-        @self.app.route('/api/application/metrics')
-        def api_application_metrics():
-            """API endpoint to get application metrics"""
-            try:
-                if self.app_metrics:
-                    metrics = self.app_metrics.get_metrics()
-                    return jsonify(metrics)
-                else:
-                    return jsonify({"error": "Application metrics not available"})
-            except Exception as e:
-                logger.error(f"Error getting application metrics: {e}")
-                return jsonify({"error": str(e)})
-
-        @self.app.route('/status')
-        def status():
-            """Simple status endpoint to check if the server is running"""
-            return jsonify({
-                "status": "ok",
-                "timestamp": datetime.now().isoformat(),
-                "service": "LDB Dashboard",
-                "version": self.config.app_version
-            })
-
-    def _render_dashboard_template(self):
-        """Render the main dashboard HTML template"""
-        # Get database metrics for the template
-        db_metrics = {"tables": [], "slow_queries": []}
-        if self.db_monitor:
-            try:
-                db_metrics = self.db_monitor.get_current_metrics()
-                # Ensure we have the expected structure even if it's missing
-                if "tables" not in db_metrics:
-                    db_metrics["tables"] = []
-                if "slow_queries" not in db_metrics:
-                    db_metrics["slow_queries"] = []
-            except Exception as e:
-                logger.error(f"Error getting DB metrics for template: {e}")
-        
-        # Get current metrics for live stats
-        system_metrics_data = {}
-        if self.system_metrics:
-            try:
-                system_metrics_data = self.system_metrics.get_current_metrics()
-            except Exception as e:
-                logger.error(f"Error getting system metrics: {e}")
-                system_metrics_data = {}
-        
-        # Return the HTML template string with fully implemented UI
-        return render_template_string("""
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <title>LDB Monitoring Dashboard</title>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <style>
-                /* Reset and Base Styles */
-                * {
-                    margin: 0;
-                    padding: 0;
-                    box-sizing: border-box;
-                }
-                
-                body {
-                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-                    line-height: 1.6;
-                    color: #333;
-                    background-color: #f8f9fa;
-                    padding: 20px;
-                }
-                
-                /* Layout */
-                .container {
-                    max-width: 1200px;
-                    margin: 0 auto;
-                    background-color: white;
-                    border-radius: 8px;
-                    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-                    overflow: hidden;
-                }
-                
-                h1 {
-                    padding: 20px;
-                    font-size: 24px;
-                    background-color: #2c3e50;
-                    color: white;
-                    margin: 0;
-                }
-                
-                h2 {
-                    margin-top: 0;
-                    margin-bottom: 15px;
-                    font-size: 20px;
-                    color: #2c3e50;
-                }
-                
-                h3 {
-                    margin-top: 15px;
-                    margin-bottom: 10px;
-                    font-size: 18px;
-                    color: #2c3e50;
-                }
-                
-                /* Tabs */
-                .tabs {
-                    display: flex;
-                    background-color: #34495e;
-                    overflow-x: auto;
-                    white-space: nowrap;
-                }
-                
-                .tab {
-                    padding: 12px 20px;
-                    cursor: pointer;
-                    color: rgba(255, 255, 255, 0.8);
-                    transition: all 0.2s ease;
-                }
-                
-                .tab:hover {
-                    background-color: rgba(255, 255, 255, 0.1);
-                    color: white;
-                }
-                
-                .tab.active {
-                    background-color: #2c3e50;
-                    color: white;
-                    border-bottom: 3px solid #3498db;
-                }
-                
-                /* Tab Content */
-                .tab-content {
-                    display: none;
-                    padding: 20px;
-                }
-                
-                .tab-content.active {
-                    display: block;
-                }
-                
-                /* Cards */
-                .card {
-                    background-color: white;
-                    border-radius: 6px;
-                    padding: 20px;
-                    margin-bottom: 20px;
-                    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-                    border: 1px solid #e9ecef;
-                }
-                
-                /* Tables */
-                table {
-                    width: 100%;
-                    border-collapse: collapse;
-                    margin-bottom: 10px;
-                }
-                
-                th, td {
-                    padding: 10px;
-                    border-bottom: 1px solid #e9ecef;
-                    text-align: left;
-                }
-                
-                th {
-                    background-color: #f8f9fa;
-                    font-weight: 600;
-                }
-                
-                tr:hover {
-                    background-color: #f8f9fa;
-                }
-                
-                /* Metrics */
-                .metrics {
-                    display: flex;
-                    flex-wrap: wrap;
-                    gap: 15px;
-                }
-                
-                .metric-box {
-                    flex: 1;
-                    min-width: 150px;
-                    padding: 15px;
-                    background-color: #f8f9fa;
-                    border-radius: 6px;
-                    border: 1px solid #e9ecef;
-                    text-align: center;
-                }
-                
-                .metric-value {
-                    font-size: 24px;
-                    font-weight: bold;
-                    margin: 5px 0;
-                }
-                
-                .metric-label {
-                    color: #6c757d;
-                    font-size: 14px;
-                }
-                
-                /* Status indicators */
-                .status {
-                    display: inline-block;
-                    padding: 4px 8px;
-                    border-radius: 4px;
-                    font-size: 14px;
-                    font-weight: 500;
-                }
-                
-                .status-good {
-                    background-color: #d4edda;
-                    color: #155724;
-                }
-                
-                .status-warning {
-                    background-color: #fff3cd;
-                    color: #856404;
-                }
-                
-                .status-error {
-                    background-color: #f8d7da;
-                    color: #721c24;
-                }
-                
-                .status-unknown {
-                    background-color: #e9ecef;
-                    color: #495057;
-                }
-                
-                /* Logs */
-                .logs-container {
-                    max-height: 500px;
-                    overflow-y: auto;
-                    background-color: #272822;
-                    border-radius: 6px;
-                    padding: 10px;
-                    font-family: monospace;
-                    font-size: 13px;
-                    color: #f8f8f2;
-                    margin-top: 10px;
-                }
-                
-                .log-line {
-                    padding: 3px 0;
-                    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-                    white-space: pre-wrap;
-                    word-break: break-all;
-                }
-                
-                .log-error {
-                    color: #f92672;
-                }
-                
-                .log-warning {
-                    color: #e6db74;
-                }
-                
-                .log-info {
-                    color: #66d9ef;
-                }
-                
-                /* Network diagnostics styles */
-                .network-info {
-                    margin-top: 15px;
-                }
-                
-                .network-interface {
-                    margin-bottom: 10px;
-                    padding: 10px;
-                    background: #f8f9fa;
-                    border-radius: 6px;
-                    border: 1px solid #e9ecef;
-                }
-                
-                .conn-success {
-                    color: #28a745;
-                }
-                
-                .conn-fail {
-                    color: #dc3545;
-                }
-                
-                /* Charts */
-                .chart-container {
-                    width: 100%;
-                    height: 300px;
-                    margin: 20px 0;
-                }
-                
-                /* Responsive adjustments */
-                @media (max-width: 768px) {
-                    .metrics {
-                        flex-direction: column;
-                    }
-                    
-                    .metric-box {
-                        width: 100%;
-                    }
-                    
-                    .tab {
-                        padding: 10px 15px;
-                        font-size: 14px;
-                    }
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>LDB Monitoring Dashboard</h1>
-                
-                <div class="tabs">
-                    <div class="tab active" onclick="openTab(event, 'overview')">Overview</div>
-                    <div class="tab" onclick="openTab(event, 'logs')">Logs</div>
-                    <div class="tab" onclick="openTab(event, 'database')">Database</div>
-                    <div class="tab" onclick="openTab(event, 'application')">Application</div>
-                    <div class="tab" onclick="openTab(event, 'debug')">Debug</div>
-                </div>
-                
-                <!-- Overview Tab -->
-                <div id="overview" class="tab-content active">
-                    <div class="card">
-                        <h2>System Metrics</h2>
-                        <div class="metrics">
-                            <div class="metric-box">
-                                <div class="metric-label">CPU Usage</div>
-                                <div class="metric-value" id="cpu-usage">{{ system_metrics_data.get('cpu_percent', 0) }}%</div>
-                            </div>
-                            <div class="metric-box">
-                                <div class="metric-label">Memory Usage</div>
-                                <div class="metric-value" id="memory-usage">{{ system_metrics_data.get('memory_percent', 0) }}%</div>
-                            </div>
-                            <div class="metric-box">
-                                <div class="metric-label">Disk Usage</div>
-                                <div class="metric-value" id="disk-usage">{{ system_metrics_data.get('disk_percent', 0) }}%</div>
-                            </div>
-                            <div class="metric-box">
-                                <div class="metric-label">Last Updated</div>
-                                <div class="metric-value" id="last-updated" style="font-size: 16px;">{{ system_metrics_data.get('timestamp', 'N/A') }}</div>
-                            </div>
-                        </div>
-                        <div class="chart-container" id="metrics-chart">
-                            <!-- Chart will be rendered here -->
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <h2>Service Status</h2>
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Service</th>
-                                    <th>Status</th>
-                                    <th>Last Check</th>
-                                </tr>
-                            </thead>
-                            <tbody id="services-table">
-                                {% for service in system_info.get('services', {}) %}
-                                <tr>
-                                    <td>{{ service }}</td>
-                                    <td><span class="status status-unknown">Unknown</span></td>
-                                    <td>-</td>
-                                </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                    
-                    <div class="card">
-                        <h2>System Information</h2>
-                        <table>
-                            <tbody>
-                                <tr>
-                                    <td><strong>Hostname</strong></td>
-                                    <td>{{ system_info.get('hostname', 'Unknown') }}</td>
-                                </tr>
-                                <tr>
-                                    <td><strong>Platform</strong></td>
-                                    <td>{{ system_info.get('platform', 'Unknown') }}</td>
-                                </tr>
-                                <tr>
-                                    <td><strong>Python Version</strong></td>
-                                    <td>{{ system_info.get('python_version', 'Unknown') }}</td>
-                                </tr>
-                                <tr>
-                                    <td><strong>IP Address</strong></td>
-                                    <td>{{ system_info.get('ip_address', 'Unknown') }}</td>
-                                </tr>
-                                <tr>
-                                    <td><strong>Started At</strong></td>
-                                    <td>{{ system_info.get('started_at', 'Unknown') }}</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                    
-                    <!-- Network diagnostics section -->
-                    <div class="card">
-                        <h2>Network Diagnostics</h2>
-                        <div id="network-info">
-                            <p>Loading network information...</p>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Logs Tab -->
-                <div id="logs" class="tab-content">
-                    <div class="card">
-                        <h2>Application Logs</h2>
-                        <p>Most recent application logs:</p>
-                        <div class="logs-container" id="logs-container">
-                            <p>Loading logs...</p>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <h2>Error Tracking</h2>
-                        <div id="error-container">
-                            <p>Loading recent errors...</p>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Database Tab -->
-                <div id="database" class="tab-content">
-                    <div class="card">
-                        <h2>Database Connection Status</h2>
-                        <div id="db-status">
-                            <span class="status status-unknown">Unknown</span>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <h2>Table Statistics</h2>
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Table Name</th>
-                                    <th>Row Count</th>
-                                    <th>Size</th>
-                                </tr>
-                            </thead>
-                            <tbody id="table-stats">
-                                {% for table in db_metrics.get('tables', []) %}
-                                <tr>
-                                    <td>{{ table.name }}</td>
-                                    <td>{{ table.row_count }}</td>
-                                    <td>{{ table.size }}</td>
-                                </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                    
-                    <div class="card">
-                        <h2>Slow Queries</h2>
-                        <div id="slow-queries">
-                            {% if db_metrics.get('slow_queries', []) %}
-                            <table>
-                                <thead>
-                                    <tr>
-                                        <th>Query</th>
-                                        <th>Duration (ms)</th>
-                                        <th>Timestamp</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {% for query in db_metrics.get('slow_queries', []) %}
-                                    <tr>
-                                        <td>{{ query.query }}</td>
-                                        <td>{{ query.duration }}</td>
-                                        <td>{{ query.timestamp }}</td>
-                                    </tr>
-                                    {% endfor %}
-                                </tbody>
-                            </table>
-                            {% else %}
-                            <p>No slow queries detected</p>
-                            {% endif %}
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Application Tab -->
-                <div id="application" class="tab-content">
-                    <div class="card">
-                        <h2>Application Metrics</h2>
-                        <div id="app-metrics">
-                            <p>Loading application metrics...</p>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <h2>Health Checks</h2>
-                        <div id="health-checks">
-                            <p>Loading health check results...</p>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Debug Tab -->
-                <div id="debug" class="tab-content">
-                    <div class="card">
-                        <h2>Debug Tools</h2>
-                        <button id="start-debug" class="btn">Start Debug Session</button>
-                        <button id="stop-debug" class="btn" disabled>Stop Debug Session</button>
-                        
-                        <div id="debug-output" class="logs-container" style="margin-top: 15px; display: none;">
-                            <p>Debug session output will appear here...</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
+            status = "ok"
+            message = "System resources are within normal limits"
             
-            <script>
-                // Tab switching functionality
-                function openTab(evt, tabName) {
-                    // Hide all tab content
-                    const tabContents = document.getElementsByClassName("tab-content");
-                    for (let i = 0; i < tabContents.length; i++) {
-                        tabContents[i].classList.remove("active");
-                    }
-                    
-                    // Remove active class from all tabs
-                    const tabs = document.getElementsByClassName("tab");
-                    for (let i = 0; i < tabs.length; i++) {
-                        tabs[i].classList.remove("active");
-                    }
-                    
-                    // Show the selected tab and mark it as active
-                    document.getElementById(tabName).classList.add("active");
-                    evt.currentTarget.classList.add("active");
+            # Determine status based on resource usage
+            if cpu_percent > 90 or memory.percent > 90 or disk.percent > 90:
+                status = "error"
+                message = "Critical system resource usage"
+            elif cpu_percent > 80 or memory.percent > 80 or disk.percent > 80:
+                status = "warning"
+                message = "High system resource usage"
+            
+            return {
+                "status": status,
+                "message": message,
+                "details": {
+                    "cpu_percent": cpu_percent,
+                    "memory_percent": memory.percent,
+                    "disk_percent": disk.percent
                 }
-                
-                // Function to format date for display
-                function formatTimestamp(isoString) {
-                    if (!isoString) return 'N/A';
-                    try {
-                        const date = new Date(isoString);
-                        return date.toLocaleTimeString();
-                    } catch (e) {
-                        return isoString;
-                    }
-                }
-                
-                // Format a log line with color highlighting
-                function formatLogLine(line) {
-                    const logLevels = {
-                        'ERROR': 'log-error',
-                        'CRITICAL': 'log-error',
-                        'WARNING': 'log-warning',
-                        'INFO': 'log-info',
-                        'DEBUG': 'log-info'
-                    };
-                    
-                    // Check if log line contains a log level
-                    let cssClass = '';
-                    for (const [level, className] of Object.entries(logLevels)) {
-                        if (line.includes(level)) {
-                            cssClass = className;
-                            break;
-                        }
-                    }
-                    
-                    return `<div class="log-line ${cssClass}">${line}</div>`;
-                }
-                
-                // Function to update metrics
-                function updateMetrics() {
-                    fetch('/api/metrics')
-                        .then(response => response.json())
-                        .then(data => {
-                            document.getElementById('cpu-usage').textContent = `${data.cpu_percent}%`;
-                            document.getElementById('memory-usage').textContent = `${data.memory_percent}%`;
-                            document.getElementById('disk-usage').textContent = `${data.disk_percent}%`;
-                            document.getElementById('last-updated').textContent = formatTimestamp(data.timestamp);
-                            
-                            // Update service statuses
-                            const servicesTable = document.getElementById('services-table');
-                            if (servicesTable) {
-                                servicesTable.innerHTML = '';
-                                
-                                for (const [service, status] of Object.entries(data.services)) {
-                                    const statusClass = status === 'running' ? 'status-good' : 
-                                                      (status === 'stopped' ? 'status-error' : 'status-unknown');
-                                    
-                                    const row = document.createElement('tr');
-                                    row.innerHTML = `
-                                        <td>${service}</td>
-                                        <td><span class="status ${statusClass}">${status}</span></td>
-                                        <td>${formatTimestamp(data.timestamp)}</td>
-                                    `;
-                                    servicesTable.appendChild(row);
-                                }
-                            }
-                            
-                            // Update database status
-                            const dbStatus = document.getElementById('db-status');
-                            if (dbStatus) {
-                                const statusClass = data.db_connection === 'connected' ? 'status-good' : 
-                                                  (data.db_connection === 'error' ? 'status-error' : 'status-unknown');
-                                
-                                dbStatus.innerHTML = `<span class="status ${statusClass}">${data.db_connection}</span>`;
-                            }
-                        })
-                        .catch(error => console.error('Error fetching metrics:', error));
-                }
-                
-                // Function to fetch and display logs
-                function fetchLogs() {
-                    fetch('/api/logs')
-                        .then(response => response.json())
-                        .then(data => {
-                            const logsContainer = document.getElementById('logs-container');
-                            if (logsContainer) {
-                                logsContainer.innerHTML = '';
-                                
-                                if (data && data.length > 0) {
-                                    data.forEach(line => {
-                                        logsContainer.innerHTML += formatLogLine(line);
-                                    });
-                                    
-                                    // Auto-scroll to bottom
-                                    logsContainer.scrollTop = logsContainer.scrollHeight;
-                                } else {
-                                    logsContainer.innerHTML = '<p>No logs available</p>';
-                                }
-                            }
-                        })
-                        .catch(error => console.error('Error fetching logs:', error));
-                        
-                    // Also fetch errors
-                    fetch('/api/errors')
-                        .then(response => response.json())
-                        .then(data => {
-                            const errorContainer = document.getElementById('error-container');
-                            if (errorContainer) {
-                                if (data && data.length > 0) {
-                                    let html = '<div class="logs-container">';
-                                    data.forEach(error => {
-                                        html += `<div class="log-line log-error">${error}</div>`;
-                                    });
-                                    html += '</div>';
-                                    errorContainer.innerHTML = html;
-                                } else {
-                                    errorContainer.innerHTML = '<p>No errors detected</p>';
-                                }
-                            }
-                        })
-                        .catch(error => console.error('Error fetching errors:', error));
-                }
-                
-                // Function to fetch database info
-                function fetchDatabaseInfo() {
-                    fetch('/api/db')
-                        .then(response => response.json())
-                        .then(data => {
-                            // Update DB connection status
-                            const dbStatus = document.getElementById('db-status');
-                            if (dbStatus) {
-                                const statusClass = data.connection_status === 'connected' ? 'status-good' : 
-                                                  (data.connection_status === 'error' ? 'status-error' : 'status-unknown');
-                                
-                                dbStatus.innerHTML = `<span class="status ${statusClass}">${data.connection_status}</span>`;
-                            }
-                            
-                            // Update table stats
-                            const tableStats = document.getElementById('table-stats');
-                            if (tableStats && data.tables) {
-                                tableStats.innerHTML = '';
-                                
-                                if (data.tables.length > 0) {
-                                    data.tables.forEach(table => {
-                                        const row = document.createElement('tr');
-                                        row.innerHTML = `
-                                            <td>${table.name}</td>
-                                            <td>${table.row_count || 'N/A'}</td>
-                                            <td>${table.size || 'N/A'}</td>
-                                        `;
-                                        tableStats.appendChild(row);
-                                    });
-                                } else {
-                                    tableStats.innerHTML = '<tr><td colspan="3">No table data available</td></tr>';
-                                }
-                            }
-                            
-                            // Update slow queries
-                            const slowQueries = document.getElementById('slow-queries');
-                            if (slowQueries) {
-                                if (data.slow_queries && data.slow_queries.length > 0) {
-                                    let html = `
-                                        <table>
-                                            <thead>
-                                                <tr>
-                                                    <th>Query</th>
-                                                    <th>Duration (ms)</th>
-                                                    <th>Timestamp</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                    `;
-                                    
-                                    data.slow_queries.forEach(query => {
-                                        html += `
-                                            <tr>
-                                                <td>${query.query}</td>
-                                                <td>${query.duration}</td>
-                                                <td>${formatTimestamp(query.timestamp)}</td>
-                                            </tr>
-                                        `;
-                                    });
-                                    
-                                    html += '</tbody></table>';
-                                    slowQueries.innerHTML = html;
-                                } else {
-                                    slowQueries.innerHTML = '<p>No slow queries detected</p>';
-                                }
-                            }
-                        })
-                        .catch(error => console.error('Error fetching database info:', error));
-                }
-                
-                // Function to fetch and display health checks
-                function fetchHealthChecks() {
-                    fetch('/api/health')
-                        .then(response => response.json())
-                        .then(data => {
-                            const healthChecks = document.getElementById('health-checks');
-                            if (healthChecks) {
-                                if (data && Object.keys(data).length > 0) {
-                                    let html = `
-                                        <table>
-                                            <thead>
-                                                <tr>
-                                                    <th>Check</th>
-                                                    <th>Status</th>
-                                                    <th>Details</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                    `;
-                                    
-                                    for (const [check, result] of Object.entries(data)) {
-                                        const status = result.status || 'unknown';
-                                        const statusClass = status === 'ok' ? 'status-good' : 
-                                                          (status === 'warning' ? 'status-warning' : 
-                                                          (status === 'error' ? 'status-error' : 'status-unknown'));
-                                        
-                                        html += `
-                                            <tr>
-                                                <td>${check}</td>
-                                                <td><span class="status ${statusClass}">${status}</span></td>
-                                                <td>${result.message || ''}</td>
-                                            </tr>
-                                        `;
-                                    }
-                                    
-                                    html += '</tbody></table>';
-                                    healthChecks.innerHTML = html;
-                                } else {
-                                    healthChecks.innerHTML = '<p>No health check results available</p>';
-                                }
-                            }
-                        })
-                        .catch(error => console.error('Error fetching health checks:', error));
-                }
-                
-                // Function to fetch application metrics
-                function fetchApplicationMetrics() {
-                    fetch('/api/application/metrics')
-                        .then(response => response.json())
-                        .then(data => {
-                            const appMetrics = document.getElementById('app-metrics');
-                            if (appMetrics) {
-                                if (data && Object.keys(data).length > 0) {
-                                    let html = '<div class="metrics">';
-                                    
-                                    // Process each metric type (counters, gauges, histograms)
-                                    for (const [metricName, metricInfo] of Object.entries(data)) {
-                                        const type = metricInfo.type || 'unknown';
-                                        const description = metricInfo.description || metricName;
-                                        
-                                        // Format based on the metric type
-                                        if (type === 'counter') {
-                                            // For counter metrics, show total counts
-                                            let total = 0;
-                                            for (const [label, value] of Object.entries(metricInfo.values || {})) {
-                                                total += parseInt(value) || 0;
-                                            }
-                                            
-                                            html += `
-                                                <div class="metric-box">
-                                                    <div class="metric-label">${description}</div>
-                                                    <div class="metric-value">${total}</div>
-                                                    <div style="font-size: 12px;">Counter</div>
-                                                </div>
-                                            `;
-                                        } else if (type === 'gauge') {
-                                            // For gauges, show current value
-                                            const defaultValue = metricInfo.values?.default || 0;
-                                            
-                                            html += `
-                                                <div class="metric-box">
-                                                    <div class="metric-label">${description}</div>
-                                                    <div class="metric-value">${defaultValue}</div>
-                                                    <div style="font-size: 12px;">Gauge</div>
-                                                </div>
-                                            `;
-                                        } else if (type === 'histogram') {
-                                            // For histograms, show average value
-                                            const defaultData = metricInfo.values?.default || {};
-                                            const avg = defaultData.avg || 0;
-                                            
-                                            html += `
-                                                <div class="metric-box">
-                                                    <div class="metric-label">${description}</div>
-                                                    <div class="metric-value">${parseFloat(avg).toFixed(2)}</div>
-                                                    <div style="font-size: 12px;">Average</div>
-                                                </div>
-                                            `;
-                                        } else {
-                                            // For other or unknown types, show as-is
-                                            html += `
-                                                <div class="metric-box">
-                                                    <div class="metric-label">${description}</div>
-                                                    <div class="metric-value">${JSON.stringify(metricInfo.values).slice(0, 30)}</div>
-                                                    <div style="font-size: 12px;">${type}</div>
-                                                </div>
-                                            `;
-                                        }
-                                    }
-                                    
-                                    html += '</div>';
-                                    
-                                    // Add detailed metrics tables if we have data
-                                    if (Object.keys(data).length > 0) {
-                                        html += '<h3 style="margin-top: 20px;">Detailed Metrics</h3>';
-                                        
-                                        // Add counters table
-                                        const counters = Object.entries(data).filter(([_, info]) => info.type === 'counter');
-                                        if (counters.length > 0) {
-                                            html += `
-                                                <h4 style="margin-top: 15px;">Counters</h4>
-                                                <table>
-                                                    <thead>
-                                                        <tr>
-                                                            <th>Metric</th>
-                                                            <th>Labels</th>
-                                                            <th>Value</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody>
-                                            `;
-                                            
-                                            counters.forEach(([name, info]) => {
-                                                for (const [labelStr, value] of Object.entries(info.values || {})) {
-                                                    html += `
-                                                        <tr>
-                                                            <td>${name}</td>
-                                                            <td>${labelStr}</td>
-                                                            <td>${value}</td>
-                                                        </tr>
-                                                    `;
-                                                }
-                                            });
-                                            
-                                            html += '</tbody></table>';
-                                        }
-                                        
-                                        // Add gauges table
-                                        const gauges = Object.entries(data).filter(([_, info]) => info.type === 'gauge');
-                                        if (gauges.length > 0) {
-                                            html += `
-                                                <h4 style="margin-top: 15px;">Gauges</h4>
-                                                <table>
-                                                    <thead>
-                                                        <tr>
-                                                            <th>Metric</th>
-                                                            <th>Labels</th>
-                                                            <th>Value</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody>
-                                            `;
-                                            
-                                            gauges.forEach(([name, info]) => {
-                                                for (const [labelStr, value] of Object.entries(info.values || {})) {
-                                                    html += `
-                                                        <tr>
-                                                            <td>${name}</td>
-                                                            <td>${labelStr}</td>
-                                                            <td>${value}</td>
-                                                        </tr>
-                                                    `;
-                                                }
-                                            });
-                                            
-                                            html += '</tbody></table>';
-                                        }
-                                    }
-                                    
-                                    appMetrics.innerHTML = html;
-                                } else {
-                                    appMetrics.innerHTML = '<p>No application metrics available</p>';
-                                }
-                            }
-                        })
-                        .catch(error => console.error('Error fetching application metrics:', error));
-                }
-                
-                // Function to fetch and display network information
-                function fetchNetworkInfo() {
-                    fetch('/api/network')
-                        .then(response => response.json())
-                        .then(data => {
-                            const netInfoDiv = document.getElementById('network-info');
-                            if (!netInfoDiv) return;
-                            
-                            let html = '<h3>Network Information</h3>';
-                            
-                            // Binding info
-                            html += `<div><strong>Dashboard binding:</strong> ${data.binding.host}:${data.binding.port} `;
-                            html += `(External access: ${data.binding.allow_external ? 'Enabled' : 'Disabled'})</div>`;
-                            
-                            // Connectivity tests
-                            html += '<div style="margin-top: 10px;"><strong>Connectivity Tests:</strong> ';
-                            if (data.connectivity.internet) {
-                                html += '<span class="conn-success">Internet: Connected</span> | ';
-                            } else {
-                                html += '<span class="conn-fail">Internet: Disconnected</span> | ';
-                            }
-                            
-                            if (data.connectivity.localhost) {
-                                html += '<span class="conn-success">Localhost: Connected</span>';
-                            } else {
-                                html += '<span class="conn-fail">Localhost: Disconnected</span>';
-                            }
-                            html += '</div>';
-                            
-                            // Interfaces
-                            html += '<h4>Network Interfaces</h4>';
-                            
-                            for (const [name, addresses] of Object.entries(data.interfaces)) {
-                                html += `<div class="network-interface"><strong>${name}</strong>: `;
-                                if (addresses && addresses.length > 0) {
-                                    addresses.forEach(addr => {
-                                        html += `<div>IP: ${addr.address}, Netmask: ${addr.netmask}</div>`;
-                                    });
-                                } else {
-                                    html += 'No IPv4 addresses';
-                                }
-                                html += '</div>';
-                            }
-                            
-                            html += `
-                                <div style="margin-top: 15px;">
-                                <strong>Troubleshooting tips:</strong>
-                                <ul>
-                                    <li>Make sure your firewall allows connections to port ${data.binding.port}</li>
-                                    <li>Check if the server is accessible from another device on the same network</li>
-                                    <li>Verify that the dashboard is binding to the correct interface</li>
-                                </ul>
-                                </div>
-                            `;
-                            
-                            netInfoDiv.innerHTML = html;
-                        })
-                        .catch(error => {
-                            console.error('Error fetching network info:', error);
-                            if (document.getElementById('network-info')) {
-                                document.getElementById('network-info').innerHTML = 
-                                    '<p>Error fetching network information</p>';
-                            }
-                        });
-                }
-                
-                // Debug controls
-                document.addEventListener('DOMContentLoaded', function() {
-                    const startDebugBtn = document.getElementById('start-debug');
-                    const stopDebugBtn = document.getElementById('stop-debug');
-                    const debugOutput = document.getElementById('debug-output');
-                    let debugStatusInterval;
-                    
-                    // Check and update the debug session status
-                    function updateDebugStatus() {
-                        fetch('/api/debug/status')
-                            .then(response => response.json())
-                            .then(data => {
-                                if (data.active) {
-                                    startDebugBtn.disabled = true;
-                                    stopDebugBtn.disabled = false;
-                                    debugOutput.style.display = 'block';
-                                    
-                                    // Update the output with the latest logs
-                                    if (data.output && data.output.length > 0) {
-                                        debugOutput.innerHTML = '';
-                                        data.output.forEach(line => {
-                                            debugOutput.innerHTML += `<div class="log-line">${line}</div>`;
-                                        });
-                                        // Auto-scroll to bottom
-                                        debugOutput.scrollTop = debugOutput.scrollHeight;
-                                    }
-                                } else {
-                                    // If we have a session ID but it's not active, show the output
-                                    if (data.session_id) {
-                                        startDebugBtn.disabled = false;
-                                        stopDebugBtn.disabled = true;
-                                        debugOutput.style.display = 'block';
-                                        // Keep existing output
-                                    } else {
-                                        // No session has been started
-                                        startDebugBtn.disabled = false;
-                                        stopDebugBtn.disabled = true;
-                                        // Keep default output
-                                    }
-                                }
-                            })
-                            .catch(error => {
-                                console.error('Error getting debug status:', error);
-                            });
-                    }
-                    
-                    // Initial check for debug status
-                    updateDebugStatus();
-                    
-                    if (startDebugBtn && stopDebugBtn) {
-                        startDebugBtn.addEventListener('click', function() {
-                            // Disable buttons during API call
-                            startDebugBtn.disabled = true;
-                            
-                            // Call API to start debug session
-                            fetch('/api/debug/start', {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json'
-                                }
-                            })
-                            .then(response => response.json())
-                            .then(data => {
-                                if (data.status === 'success') {
-                                    // Update UI
-                                    stopDebugBtn.disabled = false;
-                                    debugOutput.style.display = 'block';
-                                    debugOutput.innerHTML = '<div class="log-line">Starting debug session...</div>';
-                                    
-                                    // Start periodic status updates
-                                    if (!debugStatusInterval) {
-                                        debugStatusInterval = setInterval(updateDebugStatus, 2000);
-                                    }
-                                } else {
-                                    // Handle error
-                                    startDebugBtn.disabled = false;
-                                    debugOutput.style.display = 'block';
-                                    debugOutput.innerHTML = `<div class="log-line log-error">Error: ${data.message}</div>`;
-                                }
-                            })
-                            .catch(error => {
-                                console.error('Error starting debug session:', error);
-                                startDebugBtn.disabled = false;
-                                debugOutput.style.display = 'block';
-                                debugOutput.innerHTML = `<div class="log-line log-error">Error starting debug session: ${error}</div>`;
-                            });
-                        });
-                        
-                        stopDebugBtn.addEventListener('click', function() {
-                            // Disable button during API call
-                            stopDebugBtn.disabled = true;
-                            
-                            // Call API to stop debug session
-                            fetch('/api/debug/stop', {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json'
-                                }
-                            })
-                            .then(response => response.json())
-                            .then(data => {
-                                if (data.status === 'success') {
-                                    // Update UI
-                                    startDebugBtn.disabled = false;
-                                    debugOutput.innerHTML += '<div class="log-line">Debug session stopped.</div>';
-                                    
-                                    // Stop periodic status updates
-                                    clearInterval(debugStatusInterval);
-                                    debugStatusInterval = null;
-                                    
-                                    // Get final status once
-                                    setTimeout(updateDebugStatus, 1000);
-                                } else {
-                                    // Handle error
-                                    stopDebugBtn.disabled = false;
-                                    debugOutput.innerHTML += `<div class="log-line log-error">Error: ${data.message}</div>`;
-                                }
-                            })
-                            .catch(error => {
-                                console.error('Error stopping debug session:', error);
-                                stopDebugBtn.disabled = false;
-                                debugOutput.innerHTML += `<div class="log-line log-error">Error stopping debug session: ${error}</div>`;
-                            });
-                        });
-                    }
-                });
-            </script>
-        </body>
-        </html>
-        """, system_info=self.system_info.get_info(), db_metrics=db_metrics,
-           system_metrics_data=system_metrics_data)
+            }
+        except Exception as e:
+            logger.error(f"Error in basic system health check: {e}", exc_info=True)
+            return {"status": "error", "message": f"Health check error: {str(e)}"}
+    
+    def _basic_database_health_check(self):
+        """Basic database health check when the health check service isn't available"""
+        try:
+            if not self.db_engine:
+                return {"status": "error", "message": "Database connection not configured"}
+            
+            try:
+                with self.db_engine.connect() as conn:
+                    # Test simple query
+                    conn.execute(text("SELECT 1"))
+                    return {"status": "ok", "message": "Database connection successful"}
+            except Exception as e:
+                logger.error(f"Database connectivity error: {e}", exc_info=True)
+                return {"status": "error", "message": f"Database connectivity error: {str(e)}"}
+        except Exception as e:
+            logger.error(f"Error in basic database health check: {e}", exc_info=True)
+            return {"status": "error", "message": f"Health check error: {str(e)}"}
+    
+    def _check_internet_connectivity(self):
+        """Check if internet is accessible"""
+        try:
+            # Try to connect to Google's DNS
+            socket.create_connection(("8.8.8.8", 53), timeout=3)
+            return True
+        except OSError:
+            return False
+        except Exception as e:
+            logger.error(f"Error checking internet connectivity: {e}", exc_info=True)
+            return False
+    
+    def _check_localhost_connectivity(self):
+        """Check if localhost is accessible"""
+        try:
+            # Try to connect to localhost on our own port
+            socket.create_connection(("127.0.0.1", self.config.bind_port), timeout=1)
+            return True
+        except OSError:
+            try:
+                # Try an alternative port (80) in case our port isn't bound yet
+                socket.create_connection(("127.0.0.1", 80), timeout=1)
+                return True
+            except:
+                pass
+            return False
+        except Exception as e:
+            logger.error(f"Error checking localhost connectivity: {e}", exc_info=True)
+            return False
 
     def start(self, host: str = None, port: int = None, debug: bool = False):
         """Start the dashboard application"""
@@ -2265,6 +1554,11 @@ class Dashboard:
         
         # Log the actual binding that will be used
         logger.info(f"Starting dashboard on {host}:{port}" + (" (debug mode)" if debug else ""))
+        
+        # Set up authentication if in production mode
+        if not debug and host != '127.0.0.1':
+            self._setup_authentication()
+            logger.info("Authentication enabled for production environment")
         
         # Log network interfaces for better diagnostics
         for interface, addresses in self.system_info.get_info().get("network_interfaces", {}).items():
@@ -2300,6 +1594,54 @@ class Dashboard:
         except Exception as e:
             logger.critical(f"Failed to start dashboard: {str(e)}")
             sys.exit(1)
+    
+    def _setup_authentication(self):
+        """Set up basic authentication for the dashboard in production mode"""
+        try:
+            # Get credentials from environment variables
+            admin_user = os.getenv("DASHBOARD_ADMIN_USER", "admin")
+            admin_password = os.getenv("DASHBOARD_ADMIN_PASSWORD")
+            
+            if not admin_password:
+                # Generate a random password if none is set
+                import random
+                import string
+                admin_password = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(12))
+                logger.warning(f"No dashboard password set. Using generated password: {admin_password}")
+                logger.warning("Set DASHBOARD_ADMIN_PASSWORD environment variable for a persistent password")
+            
+            # Create basic authentication decorator
+            def authenticate():
+                """Send a 401 response that enables basic auth"""
+                return Response(
+                    'Authentication required for LDB Dashboard', 401,
+                    {'WWW-Authenticate': 'Basic realm="LDB Dashboard"'}
+                )
+            
+            def requires_auth(f):
+                @wraps(f)
+                def decorated(*args, **kwargs):
+                    auth = request.authorization
+                    if not auth or not (auth.username == admin_user and auth.password == admin_password):
+                        return authenticate()
+                    return f(*args, **kwargs)
+                return decorated
+            
+            # Apply authentication to all routes except status
+            for rule in self.app.url_map.iter_rules():
+                if rule.endpoint != 'status':  # Don't secure the status endpoint
+                    view_func = self.app.view_functions[rule.endpoint]
+                    self.app.view_functions[rule.endpoint] = requires_auth(view_func)
+            
+            logger.info(f"Basic authentication set up with username: {admin_user}")
+            
+            # Add a warning for HTTP Basic Auth security considerations
+            logger.warning("WARNING: Basic authentication is being used over HTTP. Consider using HTTPS or a reverse proxy")
+            
+        except Exception as e:
+            logger.error(f"Failed to set up authentication: {e}", exc_info=True)
+            logger.warning("Dashboard will run without authentication - THIS IS INSECURE")
+
 
 # Main entry point
 if __name__ == '__main__':

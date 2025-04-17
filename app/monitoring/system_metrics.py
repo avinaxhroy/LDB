@@ -5,6 +5,7 @@ import logging
 import platform
 import os
 import datetime
+import traceback
 from typing import Dict, List, Any, Optional
 
 import psutil
@@ -14,44 +15,45 @@ logger = logging.getLogger(__name__)
 
 class SystemMetricsCollector:
     """Enhanced system metrics collector with comprehensive metrics"""
-
-    def __init__(self, interval: int = 30, history_size: int = 60):
+    
+    def __init__(self, interval=30, history_size=60, memory_warning_threshold_mb=500,
+                 disk_warning_threshold_percent=80, process_memory_warning_mb=300):
         self.interval = interval
         self.history_size = history_size
+        self.memory_warning_threshold_mb = memory_warning_threshold_mb
+        self.disk_warning_threshold_percent = disk_warning_threshold_percent
+        self.process_memory_warning_mb = process_memory_warning_mb
         self.thread = None
         self.running = False
-        self.metrics = {}  # Current metrics
+        self._started = False
         self.metrics_history = {
             "timestamp": [],
             "cpu_percent": [],
             "memory_percent": [],
+            "memory_used": [],
+            "memory_available": [],
             "disk_percent": [],
-            "network_sent_bytes": [],
-            "network_recv_bytes": [],
+            "disk_used": [],
+            "disk_free": [],
+            "process_memory_mb": [],
             "open_files": [],
-            "system_load": [],
-            "process_count": [],
-            "thread_count": []  # Added thread count tracking
+            "thread_count": []
         }
-        self.start_time = datetime.datetime.now()
-        self.error_count = 0  # Track collection errors
-
-        # Get static system information
-        self.system_info = {
-            "hostname": platform.node(),
-            "platform": platform.platform(),
-            "python_version": platform.python_version(),
-            "cpu_count_physical": psutil.cpu_count(logical=False),
-            "cpu_count_logical": psutil.cpu_count(logical=True),
-            "memory_total": psutil.virtual_memory().total,
-            "disk_total": psutil.disk_usage('/').total,
-            "boot_time": datetime.datetime.fromtimestamp(psutil.boot_time()).isoformat(),
-            "application_start_time": self.start_time.isoformat(),
+        self.current_metrics = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "cpu_percent": 0,
+            "memory_percent": 0,
+            "memory_used": 0,
+            "memory_available": 0,
+            "disk_percent": 0,
+            "disk_used": 0,
+            "disk_free": 0,
+            "process_memory_mb": 0,
+            "open_files": 0,
+            "thread_count": 0
         }
-
-        # Initialize previous network counters
-        self.prev_network_io = psutil.net_io_counters()
-        self.prev_network_time = time.time()
+        self.recent_errors = []
+        self.max_errors = 20  # Maximum number of recent errors to keep
 
     def start(self):
         """Start the metrics collection thread"""
@@ -62,6 +64,7 @@ class SystemMetricsCollector:
         self.running = True
         self.thread = threading.Thread(target=self._collect_metrics_loop, daemon=True)
         self.thread.start()
+        self._started = True
         logger.info(f"System metrics collector started with {self.interval}s interval")
 
     def shutdown(self):
@@ -69,165 +72,128 @@ class SystemMetricsCollector:
         self.running = False
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=5)
-            if self.thread.is_alive():
-                logger.warning("System metrics collector thread did not shut down cleanly")
-            else:
-                logger.info("System metrics collector stopped")
-        else:
-            logger.info("System metrics collector stopped")
+        self._started = False
+        logger.info("System metrics collector stopped")
 
-    def get_current_metrics(self) -> Dict[str, Any]:
+    def get_current_metrics(self):
         """Get the most recent metrics"""
-        uptime = (datetime.datetime.now() - self.start_time).total_seconds()
-        return {
-            **self.metrics, 
-            "uptime_seconds": uptime, 
-            "system_info": self.system_info,
-            "error_count": self.error_count
-        }
+        return self.current_metrics.copy()
 
-    def get_metrics_history(self) -> Dict[str, List]:
+    def get_metrics_history(self):
         """Get historical metrics for time-series analysis"""
-        return self.metrics_history
+        return self.metrics_history.copy()
 
     def _collect_metrics_loop(self):
-        """Continuously collect system metrics"""
+        """Continuously collect system metrics with adaptive back-off on errors"""
         consecutive_errors = 0
         
         while self.running:
             try:
-                metrics = self._collect_metrics()
-                self._update_history(metrics)
+                self._collect_metrics()
                 consecutive_errors = 0  # Reset error counter on success
                 time.sleep(self.interval)
             except Exception as e:
-                self.error_count += 1
                 consecutive_errors += 1
-                logger.error(f"Error collecting system metrics: {str(e)}")
+                self._record_error(e)
                 
-                # Adaptive backoff with a cap
-                backoff = min(5 * consecutive_errors, 60)
-                logger.info(f"Retrying in {backoff} seconds")
+                # Use adaptive back-off to avoid overwhelming the system during issues
+                backoff = min(60, 5 * consecutive_errors)  # Cap at 60 seconds
+                logger.error(f"Error collecting system metrics: {str(e)}. Retrying in {backoff} seconds.")
                 time.sleep(backoff)
 
-    def _collect_metrics(self) -> Dict[str, Any]:
+    def _collect_metrics(self):
         """Collect comprehensive system metrics"""
-        # Core system metrics
-        cpu_percent = psutil.cpu_percent(interval=0.5)
-        memory = psutil.virtual_memory()
-        disk = psutil.disk_usage('/')
-
-        # Ensure cpu_percent is collected and stored
-        self.metrics["cpu_percent"] = psutil.cpu_percent(interval=0.5)
-
-        # Network metrics with rate calculation
-        current_net = psutil.net_io_counters()
-        current_time = time.time()
-        time_diff = current_time - self.prev_network_time
-
-        # Prevent division by zero
-        if time_diff > 0:
-            bytes_sent_rate = (current_net.bytes_sent - self.prev_network_io.bytes_sent) / time_diff
-            bytes_recv_rate = (current_net.bytes_recv - self.prev_network_io.bytes_recv) / time_diff
-        else:
-            bytes_sent_rate = 0
-            bytes_recv_rate = 0
-
-        self.prev_network_io = current_net
-        self.prev_network_time = current_time
-
-        # Process metrics
-        process_count = len(psutil.pids())
+        now = datetime.datetime.now()
         
-        # Current process metrics
-        current_process = psutil.Process()
         try:
-            open_files_count = len(current_process.open_files())
-            thread_count = current_process.num_threads()
-            process_memory = current_process.memory_info()
-        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-            logger.warning(f"Error accessing process metrics: {str(e)}")
-            open_files_count = 0
-            thread_count = 0
-            process_memory = None
-
-        # System load (1min, 5min, 15min averages)
-        try:
-            load_avg = os.getloadavg() if hasattr(os, 'getloadavg') else (0, 0, 0)
-        except Exception:
-            # Some systems might not support getloadavg
-            load_avg = (0, 0, 0)
-
-        # Detailed CPU metrics
-        cpu_times = psutil.cpu_times_percent()
-        cpu_stats = psutil.cpu_stats()
-
-        # Swap memory
-        swap = psutil.swap_memory()
-
-        # Compile all metrics
-        metrics = {
+            # System metrics
+            cpu_percent = psutil.cpu_percent(interval=0.5)  # Short interval for responsiveness
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
+            
+            # Process-specific metrics
+            process = psutil.Process()
+            process_memory = process.memory_info()
+            process_memory_mb = process_memory.rss / (1024 * 1024)  # Convert to MB
+            open_files_count = len(process.open_files())
+            thread_count = process.num_threads()
+            
+            # Update current metrics
+            self.current_metrics = {
+                "timestamp": now.isoformat(),
+                "cpu_percent": cpu_percent,
+                "memory_percent": memory.percent,
+                "memory_used": memory.used,
+                "memory_available": memory.available,
+                "disk_percent": disk.percent,
+                "disk_used": disk.used,
+                "disk_free": disk.free,
+                "process_memory_mb": process_memory_mb,
+                "open_files": open_files_count,
+                "thread_count": thread_count
+            }
+            
+            # Append to history
+            self.metrics_history["timestamp"].append(now.isoformat())
+            self.metrics_history["cpu_percent"].append(cpu_percent)
+            self.metrics_history["memory_percent"].append(memory.percent)
+            self.metrics_history["memory_used"].append(memory.used)
+            self.metrics_history["memory_available"].append(memory.available)
+            self.metrics_history["disk_percent"].append(disk.percent)
+            self.metrics_history["disk_used"].append(disk.used)
+            self.metrics_history["disk_free"].append(disk.free)
+            self.metrics_history["process_memory_mb"].append(process_memory_mb)
+            self.metrics_history["open_files"].append(open_files_count)
+            self.metrics_history["thread_count"].append(thread_count)
+            
+            # Limit history size
+            if len(self.metrics_history["timestamp"]) > self.history_size:
+                for key in self.metrics_history:
+                    self.metrics_history[key] = self.metrics_history[key][-self.history_size:]
+            
+            # Log warnings for resource thresholds
+            if memory.percent > self.disk_warning_threshold_percent:
+                logger.warning(f"System memory usage is high: {memory.percent}%")
+                
+            if disk.percent > self.disk_warning_threshold_percent:
+                logger.warning(f"Disk usage is high: {disk.percent}%")
+                
+            if process_memory_mb > self.process_memory_warning_mb:
+                logger.warning(f"Process memory usage is high: {process_memory_mb:.1f} MB")
+            
+            # Log standard metrics periodically (every 10 collections to avoid log flooding)
+            collection_count = len(self.metrics_history["timestamp"])
+            if collection_count % 10 == 0:
+                logger.info(
+                    f"System metrics: CPU {cpu_percent}%, "
+                    f"Memory {memory.percent}% ({memory.used / (1024**3):.1f} GB used), "
+                    f"Disk {disk.percent}% ({disk.free / (1024**3):.1f} GB free), "
+                    f"Process memory: {process_memory_mb:.1f} MB"
+                )
+        
+        except Exception as e:
+            logger.error(f"Error collecting system metrics: {str(e)}")
+            self._record_error(e)
+            raise
+    
+    def _record_error(self, error):
+        """Record an error for later analysis"""
+        self.recent_errors.append({
             "timestamp": datetime.datetime.now().isoformat(),
-            "cpu_percent": cpu_percent,
-            "cpu_user_percent": cpu_times.user,
-            "cpu_system_percent": cpu_times.system,
-            "cpu_idle_percent": cpu_times.idle,
-            "cpu_interrupts": cpu_stats.interrupts,
-            "cpu_ctx_switches": cpu_stats.ctx_switches,
-            "memory_percent": memory.percent,
-            "memory_used_bytes": memory.used,
-            "memory_available_bytes": memory.available,
-            "swap_percent": swap.percent,
-            "swap_used_bytes": swap.used,
-            "disk_percent": disk.percent,
-            "disk_used_bytes": disk.used,
-            "disk_free_bytes": disk.free,
-            "network_sent_bytes_rate": bytes_sent_rate,
-            "network_recv_bytes_rate": bytes_recv_rate,
-            "network_sent_bytes_total": current_net.bytes_sent,
-            "network_recv_bytes_total": current_net.bytes_recv,
-            "network_packets_sent": current_net.packets_sent,
-            "network_packets_recv": current_net.packets_recv,
-            "open_files": open_files_count,
-            "process_count": process_count,
-            "system_load_1min": load_avg[0],
-            "system_load_5min": load_avg[1],
-            "system_load_15min": load_avg[2],
-            "thread_count": thread_count,
+            "error": str(error),
+            "traceback": traceback.format_exc()
+        })
+        
+        # Limit the size of the error history
+        if len(self.recent_errors) > self.max_errors:
+            self.recent_errors = self.recent_errors[-self.max_errors:]
+    
+    def get_status(self):
+        """Get the status of the metrics collector"""
+        return {
+            "active": self._started,
+            "interval": self.interval,
+            "history_size": self.history_size,
+            "last_collection": self.current_metrics.get("timestamp"),
+            "error_count": len(self.recent_errors)
         }
-
-        # Add process-specific memory metrics if available
-        if process_memory:
-            metrics["process_memory_rss"] = process_memory.rss
-            metrics["process_memory_vms"] = process_memory.vms
-
-        # Log summary of metrics
-        if logger.isEnabledFor(logging.INFO):
-            logger.info(
-                f"System metrics: CPU {cpu_percent:.1f}%, Memory {memory.percent:.1f}%, "
-                f"Disk {disk.percent:.1f}%, Network ↓{bytes_recv_rate / 1024:.1f}KB/s ↑{bytes_sent_rate / 1024:.1f}KB/s"
-            )
-
-        # Update current metrics
-        self.metrics = metrics
-
-        return metrics
-
-    def _update_history(self, metrics: Dict[str, Any]):
-        """Update historical metrics"""
-        # Add to history
-        self.metrics_history["timestamp"].append(metrics["timestamp"])
-        self.metrics_history["cpu_percent"].append(metrics["cpu_percent"])
-        self.metrics_history["memory_percent"].append(metrics["memory_percent"])
-        self.metrics_history["disk_percent"].append(metrics["disk_percent"])
-        self.metrics_history["network_sent_bytes"].append(metrics["network_sent_bytes_rate"])
-        self.metrics_history["network_recv_bytes"].append(metrics["network_recv_bytes_rate"])
-        self.metrics_history["open_files"].append(metrics["open_files"])
-        self.metrics_history["system_load"].append(metrics["system_load_1min"])
-        self.metrics_history["process_count"].append(metrics["process_count"])
-        self.metrics_history["thread_count"].append(metrics["thread_count"])
-
-        # Limit history size
-        if len(self.metrics_history["timestamp"]) > self.history_size:
-            for key in self.metrics_history:
-                self.metrics_history[key] = self.metrics_history[key][-self.history_size:]
