@@ -629,4 +629,4 @@ if __name__ == "__main__":
     config_path = "e:\\LDB\\config\\dashboard_config.json"
     dashboard = LDBDashboard(update_interval=5, config_file=config_path)
     dashboard.start_monitoring()
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=8001, debug=True)
