@@ -1535,6 +1535,449 @@ class Dashboard:
             logger.error(f"Error checking localhost connectivity: {e}", exc_info=True)
             return False
 
+    def _render_dashboard_template(self):
+        """Render the dashboard HTML template"""
+        try:
+            # Create a basic HTML dashboard template
+            dashboard_html = """
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>LDB Monitoring Dashboard</title>
+                <style>
+                    body {
+                        font-family: Arial, sans-serif;
+                        margin: 0;
+                        padding: 0;
+                        background-color: #f4f7f9;
+                        color: #333;
+                    }
+                    .container {
+                        max-width: 1200px;
+                        margin: 0 auto;
+                        padding: 20px;
+                    }
+                    header {
+                        background-color: #2c3e50;
+                        color: white;
+                        padding: 1rem;
+                        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+                    }
+                    h1 {
+                        margin: 0;
+                        font-size: 1.8rem;
+                    }
+                    .dashboard-grid {
+                        display: grid;
+                        grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+                        gap: 20px;
+                        margin-top: 20px;
+                    }
+                    .card {
+                        background: white;
+                        border-radius: 5px;
+                        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+                        padding: 20px;
+                        margin-bottom: 20px;
+                    }
+                    .card h2 {
+                        margin-top: 0;
+                        border-bottom: 1px solid #eee;
+                        padding-bottom: 10px;
+                        font-size: 1.3rem;
+                        color: #2c3e50;
+                    }
+                    .status-ok {
+                        color: #27ae60;
+                    }
+                    .status-warning {
+                        color: #f39c12;
+                    }
+                    .status-error {
+                        color: #e74c3c;
+                    }
+                    .metrics-table {
+                        width: 100%;
+                        border-collapse: collapse;
+                    }
+                    .metrics-table th, .metrics-table td {
+                        text-align: left;
+                        padding: 8px;
+                        border-bottom: 1px solid #eee;
+                    }
+                    .metrics-table th {
+                        font-weight: bold;
+                        color: #7f8c8d;
+                    }
+                    .log-container {
+                        background-color: #2c3e50;
+                        color: #ecf0f1;
+                        padding: 15px;
+                        border-radius: 3px;
+                        font-family: monospace;
+                        height: 300px;
+                        overflow-y: auto;
+                    }
+                    .log-line {
+                        margin: 0;
+                        padding: 2px 0;
+                        border-bottom: 1px solid #34495e;
+                    }
+                    .refresh-button {
+                        background-color: #3498db;
+                        color: white;
+                        border: none;
+                        padding: 8px 15px;
+                        border-radius: 3px;
+                        cursor: pointer;
+                        margin-bottom: 15px;
+                    }
+                    .refresh-button:hover {
+                        background-color: #2980b9;
+                    }
+                    footer {
+                        margin-top: 40px;
+                        text-align: center;
+                        color: #7f8c8d;
+                        font-size: 0.9rem;
+                    }
+                    .api-info {
+                        margin-top: 30px;
+                        background-color: #f8f9fa;
+                        padding: 15px;
+                        border-left: 4px solid #3498db;
+                    }
+                    .api-list {
+                        list-style-type: none;
+                        padding-left: 10px;
+                    }
+                    .api-list li {
+                        margin-bottom: 8px;
+                    }
+                    .api-url {
+                        font-family: monospace;
+                        background-color: #ecf0f1;
+                        padding: 3px 6px;
+                        border-radius: 3px;
+                    }
+                </style>
+            </head>
+            <body>
+                <header>
+                    <div class="container">
+                        <h1>LDB Monitoring Dashboard</h1>
+                        <p>Desi Hip-Hop Recommendation System - System Monitoring</p>
+                    </div>
+                </header>
+                
+                <div class="container">
+                    <button class="refresh-button" onclick="window.location.reload()">Refresh Dashboard</button>
+                    
+                    <div class="dashboard-grid">
+                        <div class="card">
+                            <h2>System Overview</h2>
+                            <div id="system-info">
+                                <p>Loading system information...</p>
+                            </div>
+                        </div>
+                        
+                        <div class="card">
+                            <h2>Service Status</h2>
+                            <div id="service-status">
+                                <p>Loading service status...</p>
+                            </div>
+                        </div>
+                        
+                        <div class="card">
+                            <h2>Database</h2>
+                            <div id="database-info">
+                                <p>Loading database information...</p>
+                            </div>
+                        </div>
+                        
+                        <div class="card">
+                            <h2>Health Checks</h2>
+                            <div id="health-checks">
+                                <p>Loading health check results...</p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <h2>Recent Logs</h2>
+                        <div class="log-container" id="logs">
+                            <p>Loading logs...</p>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <h2>Application Metrics</h2>
+                        <div id="app-metrics">
+                            <p>Loading application metrics...</p>
+                        </div>
+                    </div>
+                    
+                    <div class="api-info">
+                        <h3>Available API Endpoints</h3>
+                        <ul class="api-list">
+                            <li><span class="api-url">/api/metrics</span> - Current system metrics</li>
+                            <li><span class="api-url">/api/services</span> - Service status information</li>
+                            <li><span class="api-url">/api/db</span> - Database metrics and information</li>
+                            <li><span class="api-url">/api/health</span> - Health check results</li>
+                            <li><span class="api-url">/api/logs</span> - Recent application logs</li>
+                            <li><span class="api-url">/api/errors</span> - Recent application errors</li>
+                            <li><span class="api-url">/api/system</span> - System information</li>
+                            <li><span class="api-url">/api/network</span> - Network diagnostics</li>
+                            <li><span class="api-url">/api/application/metrics</span> - Application metrics</li>
+                            <li><span class="api-url">/status</span> - Simple status check endpoint</li>
+                        </ul>
+                    </div>
+                </div>
+                
+                <footer>
+                    <div class="container">
+                        <p>LDB Monitoring Dashboard v{{ app_version }} | {{ current_time }}</p>
+                    </div>
+                </footer>
+                
+                <script>
+                    // Simple function to fetch and display data from API endpoints
+                    async function fetchData(endpoint, elementId, renderFunction) {
+                        try {
+                            const response = await fetch(endpoint);
+                            if (!response.ok) {
+                                throw new Error(`HTTP error! Status: ${response.status}`);
+                            }
+                            const data = await response.json();
+                            const element = document.getElementById(elementId);
+                            if (element && renderFunction) {
+                                element.innerHTML = renderFunction(data);
+                            }
+                        } catch (error) {
+                            console.error(`Error fetching ${endpoint}:`, error);
+                            const element = document.getElementById(elementId);
+                            if (element) {
+                                element.innerHTML = `<p class="status-error">Error loading data: ${error.message}</p>`;
+                            }
+                        }
+                    }
+                    
+                    // Render functions for different data types
+                    function renderSystemInfo(data) {
+                        return `
+                            <table class="metrics-table">
+                                <tr>
+                                    <th>Hostname</th>
+                                    <td>${data.hostname || 'Unknown'}</td>
+                                </tr>
+                                <tr>
+                                    <th>Platform</th>
+                                    <td>${data.platform || 'Unknown'}</td>
+                                </tr>
+                                <tr>
+                                    <th>Python Version</th>
+                                    <td>${data.python_version || 'Unknown'}</td>
+                                </tr>
+                                <tr>
+                                    <th>IP Address</th>
+                                    <td>${data.ip_address || 'Unknown'}</td>
+                                </tr>
+                                <tr>
+                                    <th>Started At</th>
+                                    <td>${data.started_at || 'Unknown'}</td>
+                                </tr>
+                            </table>
+                            ${data.process ? `
+                            <h3>Process Information</h3>
+                            <table class="metrics-table">
+                                <tr>
+                                    <th>PID</th>
+                                    <td>${data.process.pid}</td>
+                                </tr>
+                                <tr>
+                                    <th>CPU Usage</th>
+                                    <td>${data.process.cpu_percent}%</td>
+                                </tr>
+                                <tr>
+                                    <th>Memory (RSS)</th>
+                                    <td>${Math.round(data.process.memory_info.rss / (1024 * 1024))} MB</td>
+                                </tr>
+                                <tr>
+                                    <th>Threads</th>
+                                    <td>${data.process.threads}</td>
+                                </tr>
+                            </table>
+                            ` : ''}
+                        `;
+                    }
+                    
+                    function renderServiceStatus(data) {
+                        let html = '<table class="metrics-table"><tr><th>Service</th><th>Status</th></tr>';
+                        
+                        for (const [service, status] of Object.entries(data)) {
+                            let statusClass = 'status-ok';
+                            if (status === 'stopped' || status === 'error') {
+                                statusClass = 'status-error';
+                            } else if (status === 'starting' || status === 'stopping' || status === 'unknown') {
+                                statusClass = 'status-warning';
+                            }
+                            
+                            html += `
+                                <tr>
+                                    <td>${service}</td>
+                                    <td class="${statusClass}">${status}</td>
+                                </tr>
+                            `;
+                        }
+                        
+                        html += '</table>';
+                        return html;
+                    }
+                    
+                    function renderDatabaseInfo(data) {
+                        let statusClass = 'status-error';
+                        if (data.connection_status === 'connected') {
+                            statusClass = 'status-ok';
+                        }
+                        
+                        let html = `
+                            <p>Connection: <span class="${statusClass}">${data.connection_status}</span></p>
+                        `;
+                        
+                        if (data.tables && data.tables.length > 0) {
+                            html += '<h3>Database Tables</h3>';
+                            html += '<table class="metrics-table"><tr><th>Table</th><th>Rows</th><th>Size</th></tr>';
+                            
+                            for (const table of data.tables) {
+                                html += `
+                                    <tr>
+                                        <td>${table.name}</td>
+                                        <td>${table.rows || 'N/A'}</td>
+                                        <td>${table.size || 'N/A'}</td>
+                                    </tr>
+                                `;
+                            }
+                            
+                            html += '</table>';
+                        }
+                        
+                        if (data.slow_queries && data.slow_queries.length > 0) {
+                            html += '<h3>Slow Queries</h3>';
+                            html += '<ul>';
+                            
+                            for (const query of data.slow_queries) {
+                                html += `
+                                    <li>
+                                        <strong>${query.duration}s</strong>: ${query.query}
+                                    </li>
+                                `;
+                            }
+                            
+                            html += '</ul>';
+                        }
+                        
+                        return html;
+                    }
+                    
+                    function renderHealthChecks(data) {
+                        let html = '<table class="metrics-table"><tr><th>Check</th><th>Status</th><th>Message</th></tr>';
+                        
+                        for (const [check, info] of Object.entries(data)) {
+                            let statusClass = 'status-ok';
+                            if (info.status === 'error') {
+                                statusClass = 'status-error';
+                            } else if (info.status === 'warning') {
+                                statusClass = 'status-warning';
+                            }
+                            
+                            html += `
+                                <tr>
+                                    <td>${check}</td>
+                                    <td class="${statusClass}">${info.status}</td>
+                                    <td>${info.message}</td>
+                                </tr>
+                            `;
+                        }
+                        
+                        html += '</table>';
+                        return html;
+                    }
+                    
+                    function renderLogs(data) {
+                        if (!data || data.length === 0) {
+                            return '<p>No logs available</p>';
+                        }
+                        
+                        let html = '';
+                        for (const log of data) {
+                            let logClass = 'log-line';
+                            if (log.includes('ERROR') || log.includes('CRITICAL')) {
+                                logClass += ' status-error';
+                            } else if (log.includes('WARNING')) {
+                                logClass += ' status-warning';
+                            }
+                            
+                            html += `<pre class="${logClass}">${log}</pre>`;
+                        }
+                        
+                        return html;
+                    }
+                    
+                    function renderAppMetrics(data) {
+                        if (!data || Object.keys(data).length === 0) {
+                            return '<p>No application metrics available</p>';
+                        }
+                        
+                        let html = '<table class="metrics-table"><tr><th>Metric</th><th>Value</th><th>Type</th></tr>';
+                        
+                        for (const [metric, info] of Object.entries(data)) {
+                            const value = info.values?.default;
+                            let displayValue = '';
+                            
+                            if (info.type === 'counter' || info.type === 'gauge') {
+                                displayValue = value;
+                            } else if (info.type === 'histogram' && typeof value === 'object') {
+                                displayValue = `avg: ${value.avg}, p95: ${value.p95}`;
+                            } else {
+                                displayValue = JSON.stringify(value);
+                            }
+                            
+                            html += `
+                                <tr>
+                                    <td title="${info.description || ''}">${metric}</td>
+                                    <td>${displayValue}</td>
+                                    <td>${info.type}</td>
+                                </tr>
+                            `;
+                        }
+                        
+                        html += '</table>';
+                        return html;
+                    }
+                    
+                    // Load data when page loads
+                    document.addEventListener('DOMContentLoaded', () => {
+                        fetchData('/api/system', 'system-info', renderSystemInfo);
+                        fetchData('/api/services', 'service-status', renderServiceStatus);
+                        fetchData('/api/db', 'database-info', renderDatabaseInfo);
+                        fetchData('/api/health', 'health-checks', renderHealthChecks);
+                        fetchData('/api/logs', 'logs', renderLogs);
+                        fetchData('/api/application/metrics', 'app-metrics', renderAppMetrics);
+                    });
+                </script>
+            </body>
+            </html>
+            """
+            
+            return render_template_string(dashboard_html, 
+                                          app_version=self.config.app_version,
+                                          current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        except Exception as e:
+            logger.error(f"Error rendering dashboard template: {e}", exc_info=True)
+            return f"<h1>Dashboard Error</h1><p>Error rendering dashboard: {str(e)}</p>"
+
     def start(self, host: str = None, port: int = None, debug: bool = False):
         """Start the dashboard application"""
         # Setup routes
