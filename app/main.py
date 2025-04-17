@@ -142,12 +142,32 @@ async def startup_event():
         # Database health check
         health_check.register_database_check("main_db", engine)
 
-        # API dependencies checks (add your external APIs here)
-        health_check.register_http_endpoint(
-            "spotify_api",
-            "https://api.spotify.com/v1/status",
-            expected_status=200,
-            headers=spotify_auth.get_headers()
+        # Create a custom Spotify API health check that uses our robust auth mechanism
+        def check_spotify_api():
+            try:
+                # Use our enhanced token health check method
+                is_healthy = spotify_auth.check_token_health()
+                
+                if is_healthy:
+                    return True, "Spotify API is accessible and token is valid"
+                else:
+                    # Try to refresh the token
+                    logger.warning("Spotify token invalid, attempting to refresh...")
+                    spotify_auth.refresh_token()
+                    
+                    # Check again
+                    if spotify_auth.check_token_health():
+                        return True, "Spotify API is accessible after token refresh"
+                    else:
+                        return False, "Spotify API is inaccessible even after token refresh"
+            except Exception as e:
+                return False, f"Spotify API health check error: {str(e)}"
+                
+        # Register our custom Spotify health check
+        health_check.register_check(
+            "spotify_api", 
+            check_spotify_api,
+            "Checks if the Spotify API is accessible with valid credentials"
         )
 
     # Initialize scheduler
