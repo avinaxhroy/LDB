@@ -642,32 +642,763 @@ class Dashboard:
             except Exception as e:
                 logger.error(f"Error getting DB metrics for template: {e}")
         
-        # Return the HTML template string with the improved Database, Application, and Debug tabs
+        # Get current metrics for live stats
+        system_metrics_data = {}
+        if self.system_metrics:
+            try:
+                system_metrics_data = self.system_metrics.get_current_metrics()
+            except Exception as e:
+                logger.error(f"Error getting system metrics: {e}")
+                system_metrics_data = {}
+        
+        # Return the HTML template string with fully implemented UI
         return render_template_string("""
         <!DOCTYPE html>
-        <html>
+        <html lang="en">
         <head>
             <title>LDB Monitoring Dashboard</title>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <style>
-                /* ...existing styles... */
+                /* Reset and Base Styles */
+                * {
+                    margin: 0;
+                    padding: 0;
+                    box-sizing: border-box;
+                }
+                
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    background-color: #f8f9fa;
+                    padding: 20px;
+                }
+                
+                /* Layout */
+                .container {
+                    max-width: 1200px;
+                    margin: 0 auto;
+                    background-color: white;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+                    overflow: hidden;
+                }
+                
+                h1 {
+                    padding: 20px;
+                    font-size: 24px;
+                    background-color: #2c3e50;
+                    color: white;
+                    margin: 0;
+                }
+                
+                h2 {
+                    margin-top: 0;
+                    margin-bottom: 15px;
+                    font-size: 20px;
+                    color: #2c3e50;
+                }
+                
+                h3 {
+                    margin-top: 15px;
+                    margin-bottom: 10px;
+                    font-size: 18px;
+                    color: #2c3e50;
+                }
+                
+                /* Tabs */
+                .tabs {
+                    display: flex;
+                    background-color: #34495e;
+                    overflow-x: auto;
+                    white-space: nowrap;
+                }
+                
+                .tab {
+                    padding: 12px 20px;
+                    cursor: pointer;
+                    color: rgba(255, 255, 255, 0.8);
+                    transition: all 0.2s ease;
+                }
+                
+                .tab:hover {
+                    background-color: rgba(255, 255, 255, 0.1);
+                    color: white;
+                }
+                
+                .tab.active {
+                    background-color: #2c3e50;
+                    color: white;
+                    border-bottom: 3px solid #3498db;
+                }
+                
+                /* Tab Content */
+                .tab-content {
+                    display: none;
+                    padding: 20px;
+                }
+                
+                .tab-content.active {
+                    display: block;
+                }
+                
+                /* Cards */
+                .card {
+                    background-color: white;
+                    border-radius: 6px;
+                    padding: 20px;
+                    margin-bottom: 20px;
+                    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+                    border: 1px solid #e9ecef;
+                }
+                
+                /* Tables */
+                table {
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin-bottom: 10px;
+                }
+                
+                th, td {
+                    padding: 10px;
+                    border-bottom: 1px solid #e9ecef;
+                    text-align: left;
+                }
+                
+                th {
+                    background-color: #f8f9fa;
+                    font-weight: 600;
+                }
+                
+                tr:hover {
+                    background-color: #f8f9fa;
+                }
+                
+                /* Metrics */
+                .metrics {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 15px;
+                }
+                
+                .metric-box {
+                    flex: 1;
+                    min-width: 150px;
+                    padding: 15px;
+                    background-color: #f8f9fa;
+                    border-radius: 6px;
+                    border: 1px solid #e9ecef;
+                    text-align: center;
+                }
+                
+                .metric-value {
+                    font-size: 24px;
+                    font-weight: bold;
+                    margin: 5px 0;
+                }
+                
+                .metric-label {
+                    color: #6c757d;
+                    font-size: 14px;
+                }
+                
+                /* Status indicators */
+                .status {
+                    display: inline-block;
+                    padding: 4px 8px;
+                    border-radius: 4px;
+                    font-size: 14px;
+                    font-weight: 500;
+                }
+                
+                .status-good {
+                    background-color: #d4edda;
+                    color: #155724;
+                }
+                
+                .status-warning {
+                    background-color: #fff3cd;
+                    color: #856404;
+                }
+                
+                .status-error {
+                    background-color: #f8d7da;
+                    color: #721c24;
+                }
+                
+                .status-unknown {
+                    background-color: #e9ecef;
+                    color: #495057;
+                }
+                
+                /* Logs */
+                .logs-container {
+                    max-height: 500px;
+                    overflow-y: auto;
+                    background-color: #272822;
+                    border-radius: 6px;
+                    padding: 10px;
+                    font-family: monospace;
+                    font-size: 13px;
+                    color: #f8f8f2;
+                    margin-top: 10px;
+                }
+                
+                .log-line {
+                    padding: 3px 0;
+                    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+                    white-space: pre-wrap;
+                    word-break: break-all;
+                }
+                
+                .log-error {
+                    color: #f92672;
+                }
+                
+                .log-warning {
+                    color: #e6db74;
+                }
+                
+                .log-info {
+                    color: #66d9ef;
+                }
                 
                 /* Network diagnostics styles */
                 .network-info {
                     margin-top: 15px;
                 }
+                
                 .network-interface {
                     margin-bottom: 10px;
-                    padding: 8px;
-                    background: #f5f5f5;
-                    border-radius: 4px;
+                    padding: 10px;
+                    background: #f8f9fa;
+                    border-radius: 6px;
+                    border: 1px solid #e9ecef;
                 }
-                .conn-success { color: green; }
-                .conn-fail { color: red; }
+                
+                .conn-success {
+                    color: #28a745;
+                }
+                
+                .conn-fail {
+                    color: #dc3545;
+                }
+                
+                /* Charts */
+                .chart-container {
+                    width: 100%;
+                    height: 300px;
+                    margin: 20px 0;
+                }
+                
+                /* Responsive adjustments */
+                @media (max-width: 768px) {
+                    .metrics {
+                        flex-direction: column;
+                    }
+                    
+                    .metric-box {
+                        width: 100%;
+                    }
+                    
+                    .tab {
+                        padding: 10px 15px;
+                        font-size: 14px;
+                    }
+                }
             </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>LDB Monitoring Dashboard</h1>
+                
+                <div class="tabs">
+                    <div class="tab active" onclick="openTab(event, 'overview')">Overview</div>
+                    <div class="tab" onclick="openTab(event, 'logs')">Logs</div>
+                    <div class="tab" onclick="openTab(event, 'database')">Database</div>
+                    <div class="tab" onclick="openTab(event, 'application')">Application</div>
+                    <div class="tab" onclick="openTab(event, 'debug')">Debug</div>
+                </div>
+                
+                <!-- Overview Tab -->
+                <div id="overview" class="tab-content active">
+                    <div class="card">
+                        <h2>System Metrics</h2>
+                        <div class="metrics">
+                            <div class="metric-box">
+                                <div class="metric-label">CPU Usage</div>
+                                <div class="metric-value" id="cpu-usage">{{ system_metrics_data.get('cpu_percent', 0) }}%</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="metric-label">Memory Usage</div>
+                                <div class="metric-value" id="memory-usage">{{ system_metrics_data.get('memory_percent', 0) }}%</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="metric-label">Disk Usage</div>
+                                <div class="metric-value" id="disk-usage">{{ system_metrics_data.get('disk_percent', 0) }}%</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="metric-label">Last Updated</div>
+                                <div class="metric-value" id="last-updated" style="font-size: 16px;">{{ system_metrics_data.get('timestamp', 'N/A') }}</div>
+                            </div>
+                        </div>
+                        <div class="chart-container" id="metrics-chart">
+                            <!-- Chart will be rendered here -->
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <h2>Service Status</h2>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Service</th>
+                                    <th>Status</th>
+                                    <th>Last Check</th>
+                                </tr>
+                            </thead>
+                            <tbody id="services-table">
+                                {% for service in system_info.get('services', {}) %}
+                                <tr>
+                                    <td>{{ service }}</td>
+                                    <td><span class="status status-unknown">Unknown</span></td>
+                                    <td>-</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                    <div class="card">
+                        <h2>System Information</h2>
+                        <table>
+                            <tbody>
+                                <tr>
+                                    <td><strong>Hostname</strong></td>
+                                    <td>{{ system_info.get('hostname', 'Unknown') }}</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Platform</strong></td>
+                                    <td>{{ system_info.get('platform', 'Unknown') }}</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Python Version</strong></td>
+                                    <td>{{ system_info.get('python_version', 'Unknown') }}</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>IP Address</strong></td>
+                                    <td>{{ system_info.get('ip_address', 'Unknown') }}</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Started At</strong></td>
+                                    <td>{{ system_info.get('started_at', 'Unknown') }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                    <!-- Network diagnostics section -->
+                    <div class="card">
+                        <h2>Network Diagnostics</h2>
+                        <div id="network-info">
+                            <p>Loading network information...</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Logs Tab -->
+                <div id="logs" class="tab-content">
+                    <div class="card">
+                        <h2>Application Logs</h2>
+                        <p>Most recent application logs:</p>
+                        <div class="logs-container" id="logs-container">
+                            <p>Loading logs...</p>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <h2>Error Tracking</h2>
+                        <div id="error-container">
+                            <p>Loading recent errors...</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Database Tab -->
+                <div id="database" class="tab-content">
+                    <div class="card">
+                        <h2>Database Connection Status</h2>
+                        <div id="db-status">
+                            <span class="status status-unknown">Unknown</span>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <h2>Table Statistics</h2>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Table Name</th>
+                                    <th>Row Count</th>
+                                    <th>Size</th>
+                                </tr>
+                            </thead>
+                            <tbody id="table-stats">
+                                {% for table in db_metrics.get('tables', []) %}
+                                <tr>
+                                    <td>{{ table.name }}</td>
+                                    <td>{{ table.row_count }}</td>
+                                    <td>{{ table.size }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                    <div class="card">
+                        <h2>Slow Queries</h2>
+                        <div id="slow-queries">
+                            {% if db_metrics.get('slow_queries', []) %}
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Query</th>
+                                        <th>Duration (ms)</th>
+                                        <th>Timestamp</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for query in db_metrics.get('slow_queries', []) %}
+                                    <tr>
+                                        <td>{{ query.query }}</td>
+                                        <td>{{ query.duration }}</td>
+                                        <td>{{ query.timestamp }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                            {% else %}
+                            <p>No slow queries detected</p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Application Tab -->
+                <div id="application" class="tab-content">
+                    <div class="card">
+                        <h2>Application Metrics</h2>
+                        <div id="app-metrics">
+                            <p>Loading application metrics...</p>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <h2>Health Checks</h2>
+                        <div id="health-checks">
+                            <p>Loading health check results...</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Debug Tab -->
+                <div id="debug" class="tab-content">
+                    <div class="card">
+                        <h2>Debug Tools</h2>
+                        <button id="start-debug" class="btn">Start Debug Session</button>
+                        <button id="stop-debug" class="btn" disabled>Stop Debug Session</button>
+                        
+                        <div id="debug-output" class="logs-container" style="margin-top: 15px; display: none;">
+                            <p>Debug session output will appear here...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
             <script>
-                // ...existing JavaScript...
+                // Tab switching functionality
+                function openTab(evt, tabName) {
+                    // Hide all tab content
+                    const tabContents = document.getElementsByClassName("tab-content");
+                    for (let i = 0; i < tabContents.length; i++) {
+                        tabContents[i].classList.remove("active");
+                    }
+                    
+                    // Remove active class from all tabs
+                    const tabs = document.getElementsByClassName("tab");
+                    for (let i = 0; i < tabs.length; i++) {
+                        tabs[i].classList.remove("active");
+                    }
+                    
+                    // Show the selected tab and mark it as active
+                    document.getElementById(tabName).classList.add("active");
+                    evt.currentTarget.classList.add("active");
+                }
+                
+                // Function to format date for display
+                function formatTimestamp(isoString) {
+                    if (!isoString) return 'N/A';
+                    try {
+                        const date = new Date(isoString);
+                        return date.toLocaleTimeString();
+                    } catch (e) {
+                        return isoString;
+                    }
+                }
+                
+                // Format a log line with color highlighting
+                function formatLogLine(line) {
+                    const logLevels = {
+                        'ERROR': 'log-error',
+                        'CRITICAL': 'log-error',
+                        'WARNING': 'log-warning',
+                        'INFO': 'log-info',
+                        'DEBUG': 'log-info'
+                    };
+                    
+                    // Check if log line contains a log level
+                    let cssClass = '';
+                    for (const [level, className] of Object.entries(logLevels)) {
+                        if (line.includes(level)) {
+                            cssClass = className;
+                            break;
+                        }
+                    }
+                    
+                    return `<div class="log-line ${cssClass}">${line}</div>`;
+                }
+                
+                // Function to update metrics
+                function updateMetrics() {
+                    fetch('/api/metrics')
+                        .then(response => response.json())
+                        .then(data => {
+                            document.getElementById('cpu-usage').textContent = `${data.cpu_percent}%`;
+                            document.getElementById('memory-usage').textContent = `${data.memory_percent}%`;
+                            document.getElementById('disk-usage').textContent = `${data.disk_percent}%`;
+                            document.getElementById('last-updated').textContent = formatTimestamp(data.timestamp);
+                            
+                            // Update service statuses
+                            const servicesTable = document.getElementById('services-table');
+                            if (servicesTable) {
+                                servicesTable.innerHTML = '';
+                                
+                                for (const [service, status] of Object.entries(data.services)) {
+                                    const statusClass = status === 'running' ? 'status-good' : 
+                                                      (status === 'stopped' ? 'status-error' : 'status-unknown');
+                                    
+                                    const row = document.createElement('tr');
+                                    row.innerHTML = `
+                                        <td>${service}</td>
+                                        <td><span class="status ${statusClass}">${status}</span></td>
+                                        <td>${formatTimestamp(data.timestamp)}</td>
+                                    `;
+                                    servicesTable.appendChild(row);
+                                }
+                            }
+                            
+                            // Update database status
+                            const dbStatus = document.getElementById('db-status');
+                            if (dbStatus) {
+                                const statusClass = data.db_connection === 'connected' ? 'status-good' : 
+                                                  (data.db_connection === 'error' ? 'status-error' : 'status-unknown');
+                                
+                                dbStatus.innerHTML = `<span class="status ${statusClass}">${data.db_connection}</span>`;
+                            }
+                        })
+                        .catch(error => console.error('Error fetching metrics:', error));
+                }
+                
+                // Function to fetch and display logs
+                function fetchLogs() {
+                    fetch('/api/logs')
+                        .then(response => response.json())
+                        .then(data => {
+                            const logsContainer = document.getElementById('logs-container');
+                            if (logsContainer) {
+                                logsContainer.innerHTML = '';
+                                
+                                if (data && data.length > 0) {
+                                    data.forEach(line => {
+                                        logsContainer.innerHTML += formatLogLine(line);
+                                    });
+                                    
+                                    // Auto-scroll to bottom
+                                    logsContainer.scrollTop = logsContainer.scrollHeight;
+                                } else {
+                                    logsContainer.innerHTML = '<p>No logs available</p>';
+                                }
+                            }
+                        })
+                        .catch(error => console.error('Error fetching logs:', error));
+                        
+                    // Also fetch errors
+                    fetch('/api/errors')
+                        .then(response => response.json())
+                        .then(data => {
+                            const errorContainer = document.getElementById('error-container');
+                            if (errorContainer) {
+                                if (data && data.length > 0) {
+                                    let html = '<div class="logs-container">';
+                                    data.forEach(error => {
+                                        html += `<div class="log-line log-error">${error}</div>`;
+                                    });
+                                    html += '</div>';
+                                    errorContainer.innerHTML = html;
+                                } else {
+                                    errorContainer.innerHTML = '<p>No errors detected</p>';
+                                }
+                            }
+                        })
+                        .catch(error => console.error('Error fetching errors:', error));
+                }
+                
+                // Function to fetch database info
+                function fetchDatabaseInfo() {
+                    fetch('/api/db')
+                        .then(response => response.json())
+                        .then(data => {
+                            // Update DB connection status
+                            const dbStatus = document.getElementById('db-status');
+                            if (dbStatus) {
+                                const statusClass = data.connection_status === 'connected' ? 'status-good' : 
+                                                  (data.connection_status === 'error' ? 'status-error' : 'status-unknown');
+                                
+                                dbStatus.innerHTML = `<span class="status ${statusClass}">${data.connection_status}</span>`;
+                            }
+                            
+                            // Update table stats
+                            const tableStats = document.getElementById('table-stats');
+                            if (tableStats && data.tables) {
+                                tableStats.innerHTML = '';
+                                
+                                if (data.tables.length > 0) {
+                                    data.tables.forEach(table => {
+                                        const row = document.createElement('tr');
+                                        row.innerHTML = `
+                                            <td>${table.name}</td>
+                                            <td>${table.row_count || 'N/A'}</td>
+                                            <td>${table.size || 'N/A'}</td>
+                                        `;
+                                        tableStats.appendChild(row);
+                                    });
+                                } else {
+                                    tableStats.innerHTML = '<tr><td colspan="3">No table data available</td></tr>';
+                                }
+                            }
+                            
+                            // Update slow queries
+                            const slowQueries = document.getElementById('slow-queries');
+                            if (slowQueries) {
+                                if (data.slow_queries && data.slow_queries.length > 0) {
+                                    let html = `
+                                        <table>
+                                            <thead>
+                                                <tr>
+                                                    <th>Query</th>
+                                                    <th>Duration (ms)</th>
+                                                    <th>Timestamp</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                    `;
+                                    
+                                    data.slow_queries.forEach(query => {
+                                        html += `
+                                            <tr>
+                                                <td>${query.query}</td>
+                                                <td>${query.duration}</td>
+                                                <td>${formatTimestamp(query.timestamp)}</td>
+                                            </tr>
+                                        `;
+                                    });
+                                    
+                                    html += '</tbody></table>';
+                                    slowQueries.innerHTML = html;
+                                } else {
+                                    slowQueries.innerHTML = '<p>No slow queries detected</p>';
+                                }
+                            }
+                        })
+                        .catch(error => console.error('Error fetching database info:', error));
+                }
+                
+                // Function to fetch and display health checks
+                function fetchHealthChecks() {
+                    fetch('/api/health')
+                        .then(response => response.json())
+                        .then(data => {
+                            const healthChecks = document.getElementById('health-checks');
+                            if (healthChecks) {
+                                if (data && Object.keys(data).length > 0) {
+                                    let html = `
+                                        <table>
+                                            <thead>
+                                                <tr>
+                                                    <th>Check</th>
+                                                    <th>Status</th>
+                                                    <th>Details</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                    `;
+                                    
+                                    for (const [check, result] of Object.entries(data)) {
+                                        const status = result.status || 'unknown';
+                                        const statusClass = status === 'ok' ? 'status-good' : 
+                                                          (status === 'warning' ? 'status-warning' : 
+                                                          (status === 'error' ? 'status-error' : 'status-unknown'));
+                                        
+                                        html += `
+                                            <tr>
+                                                <td>${check}</td>
+                                                <td><span class="status ${statusClass}">${status}</span></td>
+                                                <td>${result.message || ''}</td>
+                                            </tr>
+                                        `;
+                                    }
+                                    
+                                    html += '</tbody></table>';
+                                    healthChecks.innerHTML = html;
+                                } else {
+                                    healthChecks.innerHTML = '<p>No health check results available</p>';
+                                }
+                            }
+                        })
+                        .catch(error => console.error('Error fetching health checks:', error));
+                }
+                
+                // Function to fetch application metrics
+                function fetchApplicationMetrics() {
+                    fetch('/api/metrics')
+                        .then(response => response.json())
+                        .then(data => {
+                            const appMetrics = document.getElementById('app-metrics');
+                            if (appMetrics) {
+                                // If we have actual app metrics, show them
+                                // For now, just display system metrics
+                                let html = `
+                                    <div class="metrics">
+                                        <div class="metric-box">
+                                            <div class="metric-label">CPU Usage</div>
+                                            <div class="metric-value">${data.cpu_percent}%</div>
+                                        </div>
+                                        <div class="metric-box">
+                                            <div class="metric-label">Memory Usage</div>
+                                            <div class="metric-value">${data.memory_percent}%</div>
+                                        </div>
+                                        <div class="metric-box">
+                                            <div class="metric-label">Disk Usage</div>
+                                            <div class="metric-value">${data.disk_percent}%</div>
+                                        </div>
+                                    </div>
+                                `;
+                                appMetrics.innerHTML = html;
+                            }
+                        })
+                        .catch(error => console.error('Error fetching application metrics:', error));
+                }
                 
                 // Function to fetch and display network information
                 function fetchNetworkInfo() {
@@ -684,7 +1415,7 @@ class Dashboard:
                             html += `(External access: ${data.binding.allow_external ? 'Enabled' : 'Disabled'})</div>`;
                             
                             // Connectivity tests
-                            html += '<div><strong>Connectivity Tests:</strong> ';
+                            html += '<div style="margin-top: 10px;"><strong>Connectivity Tests:</strong> ';
                             if (data.connectivity.internet) {
                                 html += '<span class="conn-success">Internet: Connected</span> | ';
                             } else {
@@ -735,58 +1466,54 @@ class Dashboard:
                         });
                 }
                 
-                // Add network fetching to initial load
+                // Debug controls
                 document.addEventListener('DOMContentLoaded', function() {
-                    // ...existing code...
+                    const startDebugBtn = document.getElementById('start-debug');
+                    const stopDebugBtn = document.getElementById('stop-debug');
+                    const debugOutput = document.getElementById('debug-output');
+                    
+                    if (startDebugBtn && stopDebugBtn) {
+                        startDebugBtn.addEventListener('click', function() {
+                            startDebugBtn.disabled = true;
+                            stopDebugBtn.disabled = false;
+                            debugOutput.style.display = 'block';
+                            debugOutput.innerHTML = '<p>Debug session started...</p>';
+                            
+                            // Here you would typically call an API endpoint to start a debug session
+                            // For demonstration, we'll just update the UI
+                        });
+                        
+                        stopDebugBtn.addEventListener('click', function() {
+                            startDebugBtn.disabled = false;
+                            stopDebugBtn.disabled = true;
+                            debugOutput.innerHTML += '<p>Debug session stopped.</p>';
+                            
+                            // Here you would typically call an API endpoint to stop a debug session
+                        });
+                    }
+                    
+                    // Initial data load
+                    updateMetrics();
+                    fetchLogs();
+                    fetchDatabaseInfo();
+                    fetchHealthChecks();
+                    fetchApplicationMetrics();
                     fetchNetworkInfo();
+                    
+                    // Set up periodic refreshes
+                    setInterval(updateMetrics, 5000);
+                    setInterval(fetchLogs, 10000);
+                    setInterval(fetchDatabaseInfo, 15000);
+                    setInterval(fetchHealthChecks, 30000);
+                    setInterval(fetchApplicationMetrics, 5000);
+                    setInterval(fetchNetworkInfo, 60000);
                 });
             </script>
-        </head>
-        <body>
-            <div class="container">
-                <h1>LDB Monitoring Dashboard</h1>
-                
-                <div class="tabs">
-                    <div class="tab active" onclick="openTab(event, 'overview')">Overview</div>
-                    <div class="tab" onclick="openTab(event, 'logs')">Logs</div>
-                    <div class="tab" onclick="openTab(event, 'database')">Database</div>
-                    <div class="tab" onclick="openTab(event, 'application')">Application</div>
-                    <div class="tab" onclick="openTab(event, 'debug')">Debug</div>
-                </div>
-                
-                <!-- Overview Tab - with network info added -->
-                <div id="overview" class="tab-content active">
-                    <div class="card">
-                        <h2>System Metrics</h2>
-                        <div class="metrics">
-                            <!-- ...existing metrics... -->
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <h2>Service Status</h2>
-                        <!-- ...existing service status... -->
-                    </div>
-                    
-                    <div class="card">
-                        <h2>System Information</h2>
-                        <!-- ...existing system info... -->
-                    </div>
-                    
-                    <!-- New network diagnostics section -->
-                    <div class="card">
-                        <h2>Network Diagnostics</h2>
-                        <div id="network-info">
-                            <p>Loading network information...</p>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- ...other tabs remain unchanged... -->
-        
-        <!-- ...existing code... -->
-        """, system_info=self.system_info.get_info(), db_metrics=db_metrics)
-    
+        </body>
+        </html>
+        """, system_info=self.system_info.get_info(), db_metrics=db_metrics,
+           system_metrics_data=system_metrics_data)
+
     def start(self, host: str = None, port: int = None, debug: bool = False):
         """Start the dashboard application"""
         # Setup routes
