@@ -44,18 +44,37 @@ class MonitoringSystem:
         self.config = config or MonitoringConfig.from_env()
         self.components = {}
         self.exporters = []
+        self._started = False
         logger.info(f"Initializing monitoring system for {self.config.service_name}")
 
     def register_component(self, name: str, component: Any):
         """Register a monitoring component"""
         self.components[name] = component
         logger.debug(f"Registered monitoring component: {name}")
+        
+        # Auto-start component if monitoring system is already running
+        if self._started and hasattr(component, 'start'):
+            try:
+                component.start()
+                logger.info(f"Auto-started new component: {name}")
+            except Exception as e:
+                logger.error(f"Failed to auto-start component {name}: {str(e)}")
+                
         return component
 
     def register_exporter(self, exporter: Any):
         """Register a metrics exporter"""
         self.exporters.append(exporter)
         logger.debug(f"Registered metrics exporter: {exporter.__class__.__name__}")
+        
+        # Auto-start exporter if monitoring system is already running
+        if self._started and hasattr(exporter, 'start'):
+            try:
+                exporter.start()
+                logger.info(f"Auto-started new exporter: {exporter.__class__.__name__}")
+            except Exception as e:
+                logger.error(f"Failed to auto-start exporter {exporter.__class__.__name__}: {str(e)}")
+                
         return exporter
 
     def start(self):
@@ -80,6 +99,7 @@ class MonitoringSystem:
                 except Exception as e:
                     logger.error(f"Failed to start exporter {exporter.__class__.__name__}: {str(e)}")
 
+        self._started = True
         logger.info("Monitoring system started successfully")
 
     def shutdown(self):
@@ -102,7 +122,42 @@ class MonitoringSystem:
                 except Exception as e:
                     logger.error(f"Error shutting down component {name}: {str(e)}")
 
+        self._started = False
         logger.info("Monitoring system shutdown complete")
+        
+    def get_status(self):
+        """Get status of all monitoring components"""
+        status = {
+            "system": "active" if self._started else "inactive",
+            "components": {},
+            "exporters": []
+        }
+        
+        # Collect component statuses
+        for name, component in self.components.items():
+            component_status = {
+                "name": name,
+                "active": hasattr(component, '_started') and component._started if hasattr(component, '_started') else "unknown"
+            }
+            
+            # Add additional component info if available
+            if hasattr(component, 'get_status'):
+                try:
+                    component_status.update(component.get_status())
+                except Exception as e:
+                    component_status["error"] = str(e)
+                    
+            status["components"][name] = component_status
+            
+        # Collect exporter statuses
+        for exporter in self.exporters:
+            exporter_status = {
+                "name": exporter.__class__.__name__,
+                "active": hasattr(exporter, '_started') and exporter._started if hasattr(exporter, '_started') else "unknown"
+            }
+            status["exporters"].append(exporter_status)
+            
+        return status
 
 
 # Global instance

@@ -982,13 +982,40 @@ class Dashboard:
                 if self.db_monitor:
                     try:
                         metrics = self.db_monitor.get_current_metrics()
+                        
+                        # Ensure table data is in the expected format for the frontend
+                        if "schema" in metrics and "tables" in metrics["schema"]:
+                            table_names = metrics["schema"]["tables"]
+                            tables_data = []
+                            
+                            # Convert table names into the format expected by the frontend
+                            for table_name in table_names:
+                                row_count = metrics.get("record_counts", {}).get(table_name, 0)
+                                size = metrics.get("table_sizes", {}).get(table_name, {}).get("pretty", "Unknown")
+                                
+                                tables_data.append({
+                                    "name": table_name,
+                                    "row_count": row_count,
+                                    "size": size
+                                })
+                                
+                            # Replace schema.tables with formatted table data
+                            metrics["tables"] = tables_data
+                        else:
+                            # Create empty tables list if schema information is missing
+                            metrics["tables"] = []
+                            
                         # Ensure we have the expected structure even if it's missing
                         if "tables" not in metrics:
                             metrics["tables"] = []
                         if "slow_queries" not in metrics:
                             metrics["slow_queries"] = []
                         if "connection_status" not in metrics:
-                            metrics["connection_status"] = "unknown"
+                            if "status" in metrics:
+                                metrics["connection_status"] = metrics["status"]
+                            else:
+                                metrics["connection_status"] = "unknown"
+                                
                         return jsonify(metrics)
                     except Exception as e:
                         logger.error(f"Error getting database metrics: {e}")
@@ -1007,7 +1034,7 @@ class Dashboard:
                     })
             except Exception as e:
                 logger.error(f"Error getting database metrics: {e}")
-                return jsonify({"error": str(e)})
+                return jsonify({"error": str(e), "tables": [], "slow_queries": [], "connection_status": "error"})
         
         @self.app.route('/api/health')
         def api_health():

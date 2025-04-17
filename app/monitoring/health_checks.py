@@ -183,7 +183,11 @@ class HealthCheckService:
 
     def get_health_status(self) -> Dict[str, Any]:
         """Get current health status of all checks"""
-        overall_status = all(result["status"] for result in self.check_results.values())
+        # Run checks immediately if we don't have results yet
+        if not self.check_results:
+            self._run_all_checks()
+            
+        overall_status = all(result.get("status", False) for result in self.check_results.values()) if self.check_results else False
 
         return {
             "status": "healthy" if overall_status else "unhealthy",
