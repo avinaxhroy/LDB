@@ -325,6 +325,30 @@ class LogCollector:
         return self.application_errors.copy()
 
 
+class ServiceMonitor:
+    """Stub for ServiceMonitor to avoid undefined reference."""
+    def __init__(self, config):
+        self.config = config
+
+    def get_service_status(self):
+        return {service: "unknown" for service in self.config.system_services}
+
+    def get_service_history(self):
+        return []
+
+
+class DebugSessionManager:
+    """Stub for DebugSessionManager to avoid undefined reference."""
+    def __init__(self, config):
+        self.config = config
+
+    def start_debug_session(self):
+        return "Debug session started"
+
+    def stop_debug_session(self):
+        return "Debug session stopped"
+
+
 class Dashboard:
     """Main dashboard class that coordinates all monitoring components"""
     
