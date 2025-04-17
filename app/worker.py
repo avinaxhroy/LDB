@@ -3,6 +3,7 @@
 from celery import Celery
 from app.core.config import settings
 from app.db.session import SessionLocal
+from app.core.utils import log_exceptions
 import logging
 
 # Set up logging for worker tasks
@@ -23,6 +24,7 @@ celery_app.conf.task_routes = {
 }
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+@log_exceptions
 def process_embeddings(self, limit: int = 100):
     """Process embeddings for songs without embeddings"""
     logger.info(f"Running process_embeddings with limit={limit}")
@@ -65,6 +67,7 @@ def process_embeddings(self, limit: int = 100):
         db.close()
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+@log_exceptions
 def process_genre_tags(self, limit: int = 100):
     """Process genre tags for songs without tags"""
     logger.info(f"Running process_genre_tags with limit={limit}")
@@ -81,6 +84,7 @@ def process_genre_tags(self, limit: int = 100):
         db.close()
 
 @celery_app.task(bind=True, max_retries=2, default_retry_delay=300)
+@log_exceptions
 def optimize_database(self):
     """Run database optimization"""
     logger.info("Running database optimization")
@@ -97,6 +101,7 @@ def optimize_database(self):
         db.close()
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+@log_exceptions
 def update_trending(self):
     """Update trending songs and artists"""
     logger.info("Running update_trending task")
@@ -117,6 +122,7 @@ def update_trending(self):
         db.close()
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+@log_exceptions
 def process_voice_recognition(self, limit: int = 50):
     """Process voice fingerprints for artists without voice fingerprints"""
     logger.info(f"Running process_voice_recognition with limit={limit}")
@@ -152,6 +158,7 @@ def process_voice_recognition(self, limit: int = 50):
         db.close()
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+@log_exceptions
 def collect_from_reddit_task(self):
     """Celery task: Collect music data from Reddit"""
     logger.info("Starting Reddit collection job (Celery)")
@@ -168,6 +175,7 @@ def collect_from_reddit_task(self):
         db.close()
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+@log_exceptions
 def collect_from_youtube_task(self):
     """Celery task: Collect music data from YouTube"""
     logger.info("Starting YouTube collection job (Celery)")
@@ -184,6 +192,7 @@ def collect_from_youtube_task(self):
         db.close()
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+@log_exceptions
 def collect_from_blogs_task(self):
     """Celery task: Collect music data from blogs"""
     logger.info("Starting blog collection job (Celery)")
@@ -200,6 +209,7 @@ def collect_from_blogs_task(self):
         db.close()
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+@log_exceptions
 def collect_from_instagram_task(self):
     """Celery task: Collect music data from Instagram"""
     logger.info("Starting Instagram collection job (Celery)")
@@ -216,6 +226,7 @@ def collect_from_instagram_task(self):
         db.close()
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+@log_exceptions
 def enrich_with_spotify_task(self):
     """Celery task: Enrich songs with Spotify data"""
     logger.info("Starting Spotify enrichment job (Celery)")
@@ -232,6 +243,7 @@ def enrich_with_spotify_task(self):
         db.close()
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+@log_exceptions
 def fetch_lyrics_task(self):
     """Celery task: Fetch lyrics for songs"""
     logger.info("Starting lyrics fetching job (Celery)")
@@ -248,6 +260,7 @@ def fetch_lyrics_task(self):
         db.close()
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+@log_exceptions
 def analyze_with_llm_task(self):
     """Celery task: Analyze songs with LLM"""
     logger.info("Starting LLM analysis job (Celery)")
@@ -264,6 +277,7 @@ def analyze_with_llm_task(self):
         db.close()
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+@log_exceptions
 def calculate_engagement_scores_task(self):
     """Celery task: Calculate engagement scores for songs"""
     logger.info("Starting engagement score calculation job (Celery)")

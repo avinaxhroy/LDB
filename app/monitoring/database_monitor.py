@@ -3,6 +3,7 @@ import time
 import threading
 import logging
 import datetime
+import traceback
 from typing import Dict, List, Any, Optional
 
 from sqlalchemy import text, create_engine, inspect
@@ -32,6 +33,7 @@ class DatabaseMonitor:
             "status": []
         }
         self.start_time = datetime.datetime.now()
+        self.recent_errors = []  # Store recent DB errors for debugging
 
         # Get or create database schema info
         self.schema_info = self._get_schema_info()
@@ -130,6 +132,21 @@ class DatabaseMonitor:
                 logger.info(f"Retrying database monitoring in {backoff} seconds")
                 time.sleep(backoff)
 
+    def _analyze_db_exception(self, exc, table_name=None, sql=None):
+        """Analyze DB exception and return (reason, suggestion)"""
+        msg = str(exc).lower()
+        if 'permission' in msg or 'denied' in msg or 'not allowed' in msg:
+            return ("Permission denied", f"Check DB user permissions for table '{table_name}'")
+        if 'does not exist' in msg or 'no such table' in msg or 'unknown table' in msg:
+            return ("Table missing", f"Table '{table_name}' does not exist. Check migrations or spelling.")
+        if 'syntax' in msg or 'parse error' in msg:
+            return ("SQL syntax error", f"Check SQL syntax: {sql}")
+        if 'timeout' in msg:
+            return ("Query timeout", "Query took too long. Check DB load or indexes.")
+        if 'connection' in msg or 'could not connect' in msg:
+            return ("Connection error", "Check DB server/network connectivity.")
+        return ("Unknown DB error", "Check logs and stack trace for details.")
+
     def _collect_metrics(self) -> Dict[str, Any]:
         """Collect comprehensive database metrics"""
         metrics = {
@@ -177,10 +194,26 @@ class DatabaseMonitor:
                             estimated_size = conn.execute(size_query).scalar() or 0
                             metrics["record_counts"][table_name] = estimated_size
                         else:
-                            count = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar()
+                            count_sql = f"SELECT COUNT(*) FROM {table_name}"
+                            count = conn.execute(text(count_sql)).scalar()
                             metrics["record_counts"][table_name] = count or 0
                     except Exception as e:
-                        logger.error(f"Error counting records in {table_name}: {str(e)}")
+                        tb = traceback.format_exc()
+                        reason, suggestion = self._analyze_db_exception(e, table_name, count_sql if 'count_sql' in locals() else None)
+                        error_info = {
+                            "table": table_name,
+                            "error_type": type(e).__name__,
+                            "error_message": str(e),
+                            "reason": reason,
+                            "suggestion": suggestion,
+                            "traceback": tb
+                        }
+                        self.recent_errors.append(error_info)
+                        if len(self.recent_errors) > 20:
+                            self.recent_errors = self.recent_errors[-20:]
+                        logger.error(
+                            f"Error counting records in {table_name}: {e}\nReason: {reason}\nSuggestion: {suggestion}\nTraceback: {tb}"
+                        )
                         metrics["record_counts"][table_name] = -1
 
                 # Database-specific metrics
@@ -192,7 +225,19 @@ class DatabaseMonitor:
                     self._collect_sqlite_metrics(conn, metrics)
 
         except Exception as e:
-            logger.error(f"Database connection error: {str(e)}", exc_info=True)
+            tb = traceback.format_exc()
+            reason, suggestion = self._analyze_db_exception(e)
+            error_info = {
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "reason": reason,
+                "suggestion": suggestion,
+                "traceback": tb
+            }
+            self.recent_errors.append(error_info)
+            if len(self.recent_errors) > 20:
+                self.recent_errors = self.recent_errors[-20:]
+            logger.error(f"Database connection error: {e}\nReason: {reason}\nSuggestion: {suggestion}\nTraceback: {tb}")
             metrics["status"] = "error"
             metrics["error"] = str(e)
 
@@ -440,3 +485,7 @@ class DatabaseMonitor:
         memory_mb = memory_info.rss / 1024 / 1024
         if memory_mb > 500:  # Warning if memory usage is above 500 MB
             logger.warning(f"High memory usage in database monitor: {memory_mb:.2f} MB")
+
+    def get_recent_errors(self) -> list:
+        """Return recent database errors with explanations"""
+        return self.recent_errors

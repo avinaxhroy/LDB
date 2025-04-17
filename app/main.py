@@ -21,6 +21,7 @@ import psutil
 import json
 import asyncio
 import sys
+import traceback
 
 # Import enhanced monitoring components
 from app.monitoring.core import setup_monitoring, monitoring
@@ -51,6 +52,22 @@ logging.basicConfig(
     handlers=handlers
 )
 logger = logging.getLogger(__name__)
+
+# Global exception handler for uncaught exceptions
+def handle_uncaught_exception(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    logger = logging.getLogger("global")
+    logger.critical(
+        "Uncaught exception:",
+        exc_info=(exc_type, exc_value, exc_traceback)
+    )
+    # Optionally, print to stderr for visibility
+    print("Uncaught exception:", file=sys.stderr)
+    traceback.print_exception(exc_type, exc_value, exc_traceback, file=sys.stderr)
+
+sys.excepthook = handle_uncaught_exception
 
 # Create FastAPI app
 app = FastAPI(

@@ -2,6 +2,8 @@
 
 import time
 import random
+import logging
+import traceback
 from functools import wraps
 from typing import Callable, Any, TypeVar
 
@@ -40,3 +42,19 @@ def exponential_backoff_retry(
                     time.sleep(sleep_time)
         return wrapper
     return decorator
+
+def log_exceptions(func):
+    """
+    Decorator to log exceptions with traceback and function context.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            logger = logging.getLogger(func.__module__)
+            logger.error(
+                f"Exception in {func.__name__} args={args} kwargs={kwargs}: {e}\n{traceback.format_exc()}"
+            )
+            raise
+    return wrapper
