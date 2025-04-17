@@ -1555,57 +1555,54 @@ class Dashboard:
         # Log the actual binding that will be used
         logger.info(f"Starting dashboard on {host}:{port}" + (" (debug mode)" if debug else ""))
         
-        # Set up authentication if in production modered
-        if not debug and host != '127.0.0.1': is disabled - no login required")
-            self._setup_authentication()
-            logger.info("Authentication enabled for production environment")
-        for interface, addresses in self.system_info.get_info().get("network_interfaces", {}).items():
+        # Set up authentication if in production mode
+        if not debug and host != '127.0.0.1':
+            logger.info("Authentication is disabled - no login required")
+        
         # Log network interfaces for better diagnostics
         for interface, addresses in self.system_info.get_info().get("network_interfaces", {}).items():
-            if addresses:r.info(f"Available network interface: {interface} - {addr.get('address', 'unknown')}")
+            if addresses:
                 for addr in addresses:
                     logger.info(f"Available network interface: {interface} - {addr.get('address', 'unknown')}")
-        try:
+        
         # Start Flask app with better error handling
-        try:logger.info(f"To access the dashboard, open http://{host}:{port} in your browser")
-            # Add note about troubleshootingrver is running, try: curl http://{host}:{port}/status")
+        try:
             logger.info(f"To access the dashboard, open http://{host}:{port} in your browser")
             logger.info(f"To check if the server is running, try: curl http://{host}:{port}/status")
+            
+            # Extra check for port availability
             try:
-            # Extra check for port availabilityket.AF_INET, socket.SOCK_STREAM)
-            try:test_socket.bind((host, port))
                 test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                test_socket.bind((host, port))vailable for binding")
+                test_socket.bind((host, port))
+                logger.info(f"Port {port} is available for binding")
                 test_socket.close()
-                logger.info(f"Port {port} is available for binding")but attempting to start anyway")
             except OSError:
                 logger.warning(f"Port {port} may already be in use, but attempting to start anyway")
-            self.app.run(host=host, port=port, debug=debug, threaded=True)
+            
             # Start Flask app
             self.app.run(host=host, port=port, debug=debug, threaded=True)
-        except OSError as e:cal(f"Port {port} is already in use. Try a different port with --port argument")
-            if "Address already in use" in str(e): in str(e):
+        except OSError as e:
+            if "Address already in use" in str(e):
                 logger.critical(f"Port {port} is already in use. Try a different port with --port argument")
             elif "Cannot assign requested address" in str(e):
                 logger.critical(f"Cannot bind to {host}:{port}. Try 127.0.0.1 or 0.0.0.0 as host")
-            else:xit(1)
+            else:
                 logger.critical(f"Network error starting dashboard: {str(e)}")
-            sys.exit(1)ical(f"Failed to start dashboard: {str(e)}")
+            sys.exit(1)
         except Exception as e:
             logger.critical(f"Failed to start dashboard: {str(e)}")
             sys.exit(1)
-    in entry point
+    
     def _setup_authentication(self):
         """Authentication is disabled - this method is now a no-op"""
-        logger.info("Authentication is disabled. Dashboard will be accessible without login.")rse command line arguments with improved help messages
+        logger.info("Authentication is disabled. Dashboard will be accessible without login.")
         # No authentication setup will be performed
-        returng Dashboard')
+        return
 
-               help='Host to bind to (0.0.0.0 for all interfaces, 127.0.0.1 for localhost only)')
-# Main entry pointt', type=int, default=None, 
-if __name__ == '__main__':rom config or 8001)')
-    try:--debug', action='store_true', 
-        # Parse command line arguments with improved help messageslp='Enable debug mode (not recommended for production)')
+# Main entry point
+if __name__ == '__main__':
+    try:
+        # Parse command line arguments with improved help messages
         import argparse
         parser = argparse.ArgumentParser(description='LDB Monitoring Dashboard')
         parser.add_argument('--host', default=None, 
@@ -1613,14 +1610,20 @@ if __name__ == '__main__':rom config or 8001)')
         parser.add_argument('--port', type=int, default=None, 
                            help='Port to bind to (default from config or 8001)')
         parser.add_argument('--debug', action='store_true', 
-                           help='Enable debug mode (not recommended for production)')nd line args were provided
+                           help='Enable debug mode (not recommended for production)')
         parser.add_argument('--allow-external', action='store_true',
                            help='Allow connections from external addresses (overrides config)')
         args = parser.parse_args()
-        art dashboard
-        # Create dashboard instance.host, port=args.port, debug=args.debug)
+        
+        # Create dashboard instance
         dashboard = Dashboard()
         
-        # Update config if command line args were providedard: {str(e)}")
+        # Update config if command line args were provided
         if args.allow_external:
-            dashboard.config.allow_external = True                # Start dashboard        dashboard.start(host=args.host, port=args.port, debug=args.debug)        except Exception as e:        logger.critical(f"Failed to start dashboard: {str(e)}")        sys.exit(1)
+            dashboard.config.allow_external = True
+            
+        # Start dashboard
+        dashboard.start(host=args.host, port=args.port, debug=args.debug)
+    except Exception as e:
+        logger.critical(f"Failed to start dashboard: {str(e)}")
+        sys.exit(1)
