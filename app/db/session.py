@@ -69,14 +69,14 @@ def after_cursor_execute(conn, cursor, statement, parameters, context, executema
 @event.listens_for(engine, "checkout")
 def receive_checkout(dbapi_connection, connection_record, connection_proxy):
     """Track connection checkout for monitoring"""
-    logger.debug("Database connection checked out from pool")
+    logger.info("Database connection checked out from pool")
 
 
 # Track connection checkin
 @event.listens_for(engine, "checkin")
 def receive_checkin(dbapi_connection, connection_record):
     """Track connection checkin for monitoring"""
-    logger.debug("Database connection checked back into pool")
+    logger.info("Database connection checked back into pool")
 
 
 # Track connection creation
@@ -90,4 +90,4 @@ def receive_connect(dbapi_connection, connection_record):
 @event.listens_for(engine, "invalidate")
 def receive_invalidate(dbapi_connection, connection_record, exception):
     """Track connection invalidation for monitoring"""
-    logger.warning(f"Database connection invalidated: {str(exception)}")
+    logger.error(f"Database connection invalidated: {str(exception)}")

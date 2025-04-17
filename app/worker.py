@@ -150,3 +150,159 @@ def process_voice_recognition(self, limit: int = 50):
         self.retry(exc=e)
     finally:
         db.close()
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+def collect_from_reddit_task(self):
+    """Celery task: Collect music data from Reddit"""
+    logger.info("Starting Reddit collection job (Celery)")
+    from app.collectors.reddit import reddit_collector
+    db = SessionLocal()
+    try:
+        new_songs = reddit_collector.run(db)
+        logger.info(f"Reddit collection completed: {len(new_songs)} new songs added")
+        return len(new_songs)
+    except Exception as e:
+        logger.error(f"Reddit collection error: {str(e)}")
+        self.retry(exc=e)
+    finally:
+        db.close()
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+def collect_from_youtube_task(self):
+    """Celery task: Collect music data from YouTube"""
+    logger.info("Starting YouTube collection job (Celery)")
+    from app.collectors.youtube import youtube_collector
+    db = SessionLocal()
+    try:
+        new_songs = youtube_collector.run(db)
+        logger.info(f"YouTube collection completed: {len(new_songs)} songs added/updated")
+        return len(new_songs)
+    except Exception as e:
+        logger.error(f"YouTube collection error: {str(e)}")
+        self.retry(exc=e)
+    finally:
+        db.close()
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+def collect_from_blogs_task(self):
+    """Celery task: Collect music data from blogs"""
+    logger.info("Starting blog collection job (Celery)")
+    from app.collectors.blogs import blog_collector
+    db = SessionLocal()
+    try:
+        new_songs = blog_collector.run(db)
+        logger.info(f"Blog collection completed: {len(new_songs)} new songs added")
+        return len(new_songs)
+    except Exception as e:
+        logger.error(f"Blog collection error: {str(e)}")
+        self.retry(exc=e)
+    finally:
+        db.close()
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+def collect_from_instagram_task(self):
+    """Celery task: Collect music data from Instagram"""
+    logger.info("Starting Instagram collection job (Celery)")
+    from app.collectors.instagram import instagram_collector
+    db = SessionLocal()
+    try:
+        new_songs = instagram_collector.run(db)
+        logger.info(f"Instagram collection completed: {len(new_songs)} new songs added")
+        return len(new_songs)
+    except Exception as e:
+        logger.error(f"Instagram collection error: {str(e)}")
+        self.retry(exc=e)
+    finally:
+        db.close()
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+def enrich_with_spotify_task(self):
+    """Celery task: Enrich songs with Spotify data"""
+    logger.info("Starting Spotify enrichment job (Celery)")
+    from app.enrichers.spotify import spotify_enricher
+    db = SessionLocal()
+    try:
+        enriched_count = spotify_enricher.run(db, limit=50)
+        logger.info(f"Spotify enrichment completed: {enriched_count} songs enriched")
+        return enriched_count
+    except Exception as e:
+        logger.error(f"Spotify enrichment error: {str(e)}")
+        self.retry(exc=e)
+    finally:
+        db.close()
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+def fetch_lyrics_task(self):
+    """Celery task: Fetch lyrics for songs"""
+    logger.info("Starting lyrics fetching job (Celery)")
+    from app.enrichers.lyrics import lyrics_fetcher
+    db = SessionLocal()
+    try:
+        fetched_count = lyrics_fetcher.run(db, limit=25)
+        logger.info(f"Lyrics fetching completed: {fetched_count} songs processed")
+        return fetched_count
+    except Exception as e:
+        logger.error(f"Lyrics fetching error: {str(e)}")
+        self.retry(exc=e)
+    finally:
+        db.close()
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+def analyze_with_llm_task(self):
+    """Celery task: Analyze songs with LLM"""
+    logger.info("Starting LLM analysis job (Celery)")
+    from app.analysis.llm import llm_analyzer
+    db = SessionLocal()
+    try:
+        analyzed_count = llm_analyzer.run(db, limit=15, batch_size=5)
+        logger.info(f"LLM analysis completed: {analyzed_count} songs analyzed")
+        return analyzed_count
+    except Exception as e:
+        logger.error(f"LLM analysis error: {str(e)}")
+        self.retry(exc=e)
+    finally:
+        db.close()
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+def calculate_engagement_scores_task(self):
+    """Celery task: Calculate engagement scores for songs"""
+    logger.info("Starting engagement score calculation job (Celery)")
+    from sqlalchemy import func, desc
+    from app.db.models import Song, PopularityMetric, EngagementScore
+    from datetime import datetime
+    db = SessionLocal()
+    try:
+        songs = db.query(Song).all()
+        for song in songs:
+            latest_metrics = db.query(PopularityMetric).filter(
+                PopularityMetric.song_id == song.id
+            ).order_by(desc(PopularityMetric.recorded_at)).first()
+            if not latest_metrics:
+                continue
+            days_since_release = 1
+            if song.release_date:
+                delta = datetime.utcnow() - song.release_date
+                days_since_release = max(1, delta.days)
+            total_engagement = (
+                (latest_metrics.spotify_popularity or 0) +
+                (latest_metrics.youtube_views or 0) // 100 +
+                (latest_metrics.youtube_likes or 0) +
+                (latest_metrics.youtube_comments or 0) * 2 +
+                (latest_metrics.reddit_mentions or 0) * 5 +
+                (latest_metrics.twitter_mentions or 0) * 3
+            )
+            engagement_score = total_engagement / days_since_release
+            new_score = EngagementScore(
+                song_id=song.id,
+                score=engagement_score,
+                calculated_at=datetime.utcnow()
+            )
+            db.add(new_score)
+        db.commit()
+        logger.info("Engagement score calculation completed")
+        return True
+    except Exception as e:
+        logger.error(f"Engagement score calculation error: {str(e)}")
+        self.retry(exc=e)
+    finally:
+        db.close()

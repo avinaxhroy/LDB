@@ -246,114 +246,48 @@ def get_songs(
         db: Session = Depends(get_db)
 ):
     """Get a list of songs"""
-    songs = db.query(Song).offset(skip).limit(limit).all()
-    return songs
+    try:
+        songs = db.query(Song).offset(skip).limit(limit).all()
+        return songs
+    except Exception as e:
+        logger.error(f"Error fetching songs: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/songs/{song_id}", response_model=SongDetail)
 def get_song(song_id: int, db: Session = Depends(get_db)):
     """Get details for a specific song"""
-    song = db.query(Song).filter(Song.id == song_id).first()
-    if not song:
-        raise HTTPException(status_code=404, detail="Song not found")
+    try:
+        song = db.query(Song).filter(Song.id == song_id).first()
+        if not song:
+            raise HTTPException(status_code=404, detail=f"Song with id {song_id} not found")
 
-    # Get AI analysis
-    analysis = db.query(AIReview).filter(AIReview.song_id == song_id).first()
-
-    # Get latest popularity metric
-    popularity = db.query(PopularityMetric).filter(
-        PopularityMetric.song_id == song_id
-    ).order_by(desc(PopularityMetric.recorded_at)).first()
-
-    # Get latest engagement score
-    engagement = db.query(EngagementScore).filter(
-        EngagementScore.song_id == song_id
-    ).order_by(desc(EngagementScore.calculated_at)).first()
-
-    # Construct response
-    response = SongDetail(
-        id=song.id,
-        title=song.title,
-        artist=song.artist,
-        spotify_id=song.spotify_id,
-        youtube_id=song.youtube_id,
-        source=song.source,
-        source_url=song.source_url
-    )
-
-    if analysis:
-        response.analysis = SongAnalysis(
-            sentiment=analysis.sentiment,
-            emotion=analysis.emotion,
-            topic=analysis.topic,
-            lyric_complexity=analysis.lyric_complexity,
-            description=analysis.description,
-            uniqueness_score=analysis.uniqueness_score,
-            underrated_score=analysis.underrated_score,
-            quality_score=analysis.quality_score
-        )
-
-    if popularity:
-        response.popularity = popularity.spotify_popularity
-
-    if engagement:
-        response.engagement_score = engagement.score
-
-    # Track song views in application metrics
-    app_metrics.counter(
-        "song_views",
-        "Number of times songs are viewed",
-        ["song_id", "artist"]
-    ).inc(song_id=str(song.id), artist=song.artist)
-
-    return response
-
-
-@app.get("/songs/trending/", response_model=List[SongDetail])
-def get_trending_songs(
-        days: int = 7,
-        limit: int = 10,
-        db: Session = Depends(get_db)
-):
-    """Get trending songs based on engagement score"""
-    # Calculate date threshold
-    date_threshold = datetime.utcnow() - timedelta(days=days)
-
-    # Get songs with high engagement scores in the last X days
-    trending_songs = db.query(
-        Song, EngagementScore
-    ).join(
-        EngagementScore
-    ).filter(
-        EngagementScore.calculated_at >= date_threshold
-    ).order_by(
-        desc(EngagementScore.score)
-    ).limit(limit).all()
-
-    result = []
-    for song, engagement in trending_songs:
         # Get AI analysis
-        analysis = db.query(AIReview).filter(AIReview.song_id == song.id).first()
+        analysis = db.query(AIReview).filter(AIReview.song_id == song_id).first()
 
         # Get latest popularity metric
         popularity = db.query(PopularityMetric).filter(
-            PopularityMetric.song_id == song.id
+            PopularityMetric.song_id == song_id
         ).order_by(desc(PopularityMetric.recorded_at)).first()
 
+        # Get latest engagement score
+        engagement = db.query(EngagementScore).filter(
+            EngagementScore.song_id == song_id
+        ).order_by(desc(EngagementScore.calculated_at)).first()
+
         # Construct response
-        song_detail = SongDetail(
+        response = SongDetail(
             id=song.id,
             title=song.title,
             artist=song.artist,
             spotify_id=song.spotify_id,
             youtube_id=song.youtube_id,
             source=song.source,
-            source_url=song.source_url,
-            engagement_score=engagement.score
+            source_url=song.source_url
         )
 
         if analysis:
-            song_detail.analysis = SongAnalysis(
+            response.analysis = SongAnalysis(
                 sentiment=analysis.sentiment,
                 emotion=analysis.emotion,
                 topic=analysis.topic,
@@ -365,18 +299,96 @@ def get_trending_songs(
             )
 
         if popularity:
-            song_detail.popularity = popularity.spotify_popularity
+            response.popularity = popularity.spotify_popularity
 
-        result.append(song_detail)
+        if engagement:
+            response.engagement_score = engagement.score
 
-    # Track trending request in metrics
-    app_metrics.counter(
-        "trending_requests",
-        "Number of trending song requests",
-        ["days"]
-    ).inc(days=str(days))
+        # Track song views in application metrics
+        app_metrics.counter(
+            "song_views",
+            "Number of times songs are viewed",
+            ["song_id", "artist"]
+        ).inc(song_id=str(song.id), artist=song.artist)
 
-    return result
+        return response
+    except Exception as e:
+        logger.error(f"Error fetching song {song_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/songs/trending/", response_model=List[SongDetail])
+def get_trending_songs(
+        days: int = 7,
+        limit: int = 10,
+        db: Session = Depends(get_db)
+):
+    """Get trending songs based on engagement score"""
+    try:
+        # Calculate date threshold
+        date_threshold = datetime.utcnow() - timedelta(days=days)
+
+        # Get songs with high engagement scores in the last X days
+        trending_songs = db.query(
+            Song, EngagementScore
+        ).join(
+            EngagementScore
+        ).filter(
+            EngagementScore.calculated_at >= date_threshold
+        ).order_by(
+            desc(EngagementScore.score)
+        ).limit(limit).all()
+
+        result = []
+        for song, engagement in trending_songs:
+            # Get AI analysis
+            analysis = db.query(AIReview).filter(AIReview.song_id == song.id).first()
+
+            # Get latest popularity metric
+            popularity = db.query(PopularityMetric).filter(
+                PopularityMetric.song_id == song.id
+            ).order_by(desc(PopularityMetric.recorded_at)).first()
+
+            # Construct response
+            song_detail = SongDetail(
+                id=song.id,
+                title=song.title,
+                artist=song.artist,
+                spotify_id=song.spotify_id,
+                youtube_id=song.youtube_id,
+                source=song.source,
+                source_url=song.source_url,
+                engagement_score=engagement.score
+            )
+
+            if analysis:
+                song_detail.analysis = SongAnalysis(
+                    sentiment=analysis.sentiment,
+                    emotion=analysis.emotion,
+                    topic=analysis.topic,
+                    lyric_complexity=analysis.lyric_complexity,
+                    description=analysis.description,
+                    uniqueness_score=analysis.uniqueness_score,
+                    underrated_score=analysis.underrated_score,
+                    quality_score=analysis.quality_score
+                )
+
+            if popularity:
+                song_detail.popularity = popularity.spotify_popularity
+
+            result.append(song_detail)
+
+        # Track trending request in metrics
+        app_metrics.counter(
+            "trending_requests",
+            "Number of trending song requests",
+            ["days"]
+        ).inc(days=str(days))
+
+        return result
+    except Exception as e:
+        logger.error(f"Error fetching trending songs: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/songs/underrated/", response_model=List[SongDetail])
@@ -385,59 +397,63 @@ def get_underrated_songs(
         db: Session = Depends(get_db)
 ):
     """Get underrated songs based on AI analysis"""
-    # Get songs with high underrated_score but lower popularity
-    underrated_songs = db.query(
-        Song, AIReview, PopularityMetric
-    ).join(
-        AIReview
-    ).join(
-        PopularityMetric
-    ).filter(
-        AIReview.underrated_score >= 0.7,  # High underrated score
-        PopularityMetric.spotify_popularity <= 50  # Lower popularity
-    ).order_by(
-        desc(AIReview.quality_score)  # Order by quality
-    ).limit(limit).all()
+    try:
+        # Get songs with high underrated_score but lower popularity
+        underrated_songs = db.query(
+            Song, AIReview, PopularityMetric
+        ).join(
+            AIReview
+        ).join(
+            PopularityMetric
+        ).filter(
+            AIReview.underrated_score >= 0.7,  # High underrated score
+            PopularityMetric.spotify_popularity <= 50  # Lower popularity
+        ).order_by(
+            desc(AIReview.quality_score)  # Order by quality
+        ).limit(limit).all()
 
-    result = []
-    for song, analysis, popularity in underrated_songs:
-        # Get latest engagement score
-        engagement = db.query(EngagementScore).filter(
-            EngagementScore.song_id == song.id
-        ).order_by(desc(EngagementScore.calculated_at)).first()
+        result = []
+        for song, analysis, popularity in underrated_songs:
+            # Get latest engagement score
+            engagement = db.query(EngagementScore).filter(
+                EngagementScore.song_id == song.id
+            ).order_by(desc(EngagementScore.calculated_at)).first()
 
-        # Construct response
-        song_detail = SongDetail(
-            id=song.id,
-            title=song.title,
-            artist=song.artist,
-            spotify_id=song.spotify_id,
-            youtube_id=song.youtube_id,
-            source=song.source,
-            source_url=song.source_url,
-            popularity=popularity.spotify_popularity
-        )
+            # Construct response
+            song_detail = SongDetail(
+                id=song.id,
+                title=song.title,
+                artist=song.artist,
+                spotify_id=song.spotify_id,
+                youtube_id=song.youtube_id,
+                source=song.source,
+                source_url=song.source_url,
+                popularity=popularity.spotify_popularity
+            )
 
-        song_detail.analysis = SongAnalysis(
-            sentiment=analysis.sentiment,
-            emotion=analysis.emotion,
-            topic=analysis.topic,
-            lyric_complexity=analysis.lyric_complexity,
-            description=analysis.description,
-            uniqueness_score=analysis.uniqueness_score,
-            underrated_score=analysis.underrated_score,
-            quality_score=analysis.quality_score
-        )
+            song_detail.analysis = SongAnalysis(
+                sentiment=analysis.sentiment,
+                emotion=analysis.emotion,
+                topic=analysis.topic,
+                lyric_complexity=analysis.lyric_complexity,
+                description=analysis.description,
+                uniqueness_score=analysis.uniqueness_score,
+                underrated_score=analysis.underrated_score,
+                quality_score=analysis.quality_score
+            )
 
-        if engagement:
-            song_detail.engagement_score = engagement.score
+            if engagement:
+                song_detail.engagement_score = engagement.score
 
-        result.append(song_detail)
+            result.append(song_detail)
 
-    # Track underrated songs request
-    app_metrics.counter("underrated_requests").inc()
+        # Track underrated songs request
+        app_metrics.counter("underrated_requests").inc()
 
-    return result
+        return result
+    except Exception as e:
+        logger.error(f"Error fetching underrated songs: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # Database statistics endpoint
@@ -483,8 +499,8 @@ def get_database_stats(db: Session = Depends(get_db)):
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
-        logger.error(f"Error getting database stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error fetching database stats: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # Manual trigger endpoints for testing/admin

@@ -5,13 +5,6 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
-from app.collectors.reddit import reddit_collector
-from app.collectors.youtube import youtube_collector
-from app.collectors.blogs import blog_collector
-from app.collectors.instagram import instagram_collector
-from app.enrichers.spotify import spotify_enricher
-from app.enrichers.lyrics import lyrics_fetcher
-from app.analysis.llm import llm_analyzer
 import datetime
 import logging
 
@@ -21,149 +14,51 @@ logger = logging.getLogger(__name__)
 
 
 def collect_from_reddit():
-    """Collect music data from Reddit"""
-    logger.info("Starting Reddit collection job")
-    db = SessionLocal()
-    try:
-        new_songs = reddit_collector.run(db)
-        logger.info(f"Reddit collection completed: {len(new_songs)} new songs added")
-    except Exception as e:
-        logger.error(f"Reddit collection error: {str(e)}")
-    finally:
-        db.close()
+    """Schedule Reddit collection as a Celery task"""
+    from app.worker import collect_from_reddit_task
+    collect_from_reddit_task.delay()
 
 
 def collect_from_youtube():
-    """Collect music data from YouTube"""
-    logger.info("Starting YouTube collection job")
-    db = SessionLocal()
-    try:
-        new_songs = youtube_collector.run(db)
-        logger.info(f"YouTube collection completed: {len(new_songs)} songs added/updated")
-    except Exception as e:
-        logger.error(f"YouTube collection error: {str(e)}")
-    finally:
-        db.close()
+    """Schedule YouTube collection as a Celery task"""
+    from app.worker import collect_from_youtube_task
+    collect_from_youtube_task.delay()
 
 
 def collect_from_blogs():
-    """Collect music data from blogs"""
-    logger.info("Starting blog collection job")
-    db = SessionLocal()
-    try:
-        new_songs = blog_collector.run(db)
-        logger.info(f"Blog collection completed: {len(new_songs)} new songs added")
-    except Exception as e:
-        logger.error(f"Blog collection error: {str(e)}")
-    finally:
-        db.close()
+    """Schedule blog collection as a Celery task"""
+    from app.worker import collect_from_blogs_task
+    collect_from_blogs_task.delay()
 
 
 def collect_from_instagram():
-    """Collect music data from Instagram"""
-    logger.info("Starting Instagram collection job")
-    db = SessionLocal()
-    try:
-        new_songs = instagram_collector.run(db)
-        logger.info(f"Instagram collection completed: {len(new_songs)} new songs added")
-    except Exception as e:
-        logger.error(f"Instagram collection error: {str(e)}")
-    finally:
-        db.close()
+    """Schedule Instagram collection as a Celery task"""
+    from app.worker import collect_from_instagram_task
+    collect_from_instagram_task.delay()
 
 
 def enrich_with_spotify():
-    """Enrich songs with Spotify data"""
-    logger.info("Starting Spotify enrichment job")
-    db = SessionLocal()
-    try:
-        enriched_count = spotify_enricher.run(db, limit=50)
-        logger.info(f"Spotify enrichment completed: {enriched_count} songs enriched")
-    except Exception as e:
-        logger.error(f"Spotify enrichment error: {str(e)}")
-    finally:
-        db.close()
+    """Schedule Spotify enrichment as a Celery task"""
+    from app.worker import enrich_with_spotify_task
+    enrich_with_spotify_task.delay()
 
 
 def fetch_lyrics():
-    """Fetch lyrics for songs"""
-    logger.info("Starting lyrics fetching job")
-    db = SessionLocal()
-    try:
-        fetched_count = lyrics_fetcher.run(db, limit=25)
-        logger.info(f"Lyrics fetching completed: {fetched_count} songs processed")
-    except Exception as e:
-        logger.error(f"Lyrics fetching error: {str(e)}")
-    finally:
-        db.close()
+    """Schedule lyrics fetching as a Celery task"""
+    from app.worker import fetch_lyrics_task
+    fetch_lyrics_task.delay()
 
 
 def analyze_with_llm():
-    """Analyze songs with LLM"""
-    logger.info("Starting LLM analysis job")
-    db = SessionLocal()
-    try:
-        analyzed_count = llm_analyzer.run(db, limit=15, batch_size=5)
-        logger.info(f"LLM analysis completed: {analyzed_count} songs analyzed")
-    except Exception as e:
-        logger.error(f"LLM analysis error: {str(e)}")
-    finally:
-        db.close()
+    """Schedule LLM analysis as a Celery task"""
+    from app.worker import analyze_with_llm_task
+    analyze_with_llm_task.delay()
 
 
 def calculate_engagement_scores():
-    """Calculate engagement scores for songs"""
-    from sqlalchemy import func, desc
-    from app.db.models import Song, PopularityMetric, EngagementScore
-    from datetime import datetime, timedelta
-
-    logger.info("Starting engagement score calculation job")
-    db = SessionLocal()
-    try:
-        # Get all songs with popularity metrics
-        songs = db.query(Song).all()
-        for song in songs:
-            # Get the latest popularity metrics
-            latest_metrics = db.query(PopularityMetric).filter(
-                PopularityMetric.song_id == song.id
-            ).order_by(desc(PopularityMetric.recorded_at)).first()
-
-            if not latest_metrics:
-                continue
-
-            # Calculate days since release
-            days_since_release = 1  # Default value
-            if song.release_date:
-                delta = datetime.utcnow() - song.release_date
-                days_since_release = max(1, delta.days)
-
-            # Calculate engagement score
-            total_engagement = (
-                    (latest_metrics.spotify_popularity or 0) +
-                    (latest_metrics.youtube_views or 0) // 100 +  # Normalize views
-                    (latest_metrics.youtube_likes or 0) +
-                    (latest_metrics.youtube_comments or 0) * 2 +  # Comments are valuable
-                    (latest_metrics.reddit_mentions or 0) * 5 +  # Reddit mentions are valuable
-                    (latest_metrics.twitter_mentions or 0) * 3  # Twitter mentions
-            )
-
-            engagement_score = total_engagement / days_since_release
-
-            # Add new engagement score
-            new_score = EngagementScore(
-                song_id=song.id,
-                score=engagement_score,
-                calculated_at=datetime.utcnow()
-            )
-
-            db.add(new_score)
-
-        db.commit()
-        logger.info("Engagement score calculation completed")
-    except Exception as e:
-        logger.error(f"Engagement score calculation error: {str(e)}")
-    finally:
-        db.close()
+    """Schedule engagement score calculation as a Celery task"""
+    from app.worker import calculate_engagement_scores_task
+    calculate_engagement_scores_task.delay()
 
 
 def process_embeddings_job():

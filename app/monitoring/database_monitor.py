@@ -39,15 +39,8 @@ class DatabaseMonitor:
         # Initialize record count history for each table
         for table_name in self.schema_info["tables"]:
             self.metrics_history["record_counts"][table_name] = []
-            
-        # Set a connection pool size based on expected usage
-        if hasattr(engine, 'pool') and hasattr(engine.pool, 'size'):
-            # Get current size
-            current_size = engine.pool.size()
-            if current_size < 5:
-                logger.info(f"Setting database connection pool size to 5 (was {current_size})")
-                engine.pool.dispose()
-                engine.pool = create_engine(engine.url, pool_size=5).pool
+        # Removed runtime connection pool resizing for safety and best practice
+        # Pool size should be set at engine creation time only
 
     def _get_schema_info(self) -> Dict[str, Any]:
         """Get database schema information"""
@@ -156,7 +149,6 @@ class DatabaseMonitor:
                 # Set statement timeout to prevent blocking queries
                 if self.engine.dialect.name == 'postgresql':
                     conn.execute(text("SET statement_timeout = '10s'"))
-                
                 # Check connection count
                 if self.engine.dialect.name == 'postgresql':
                     result = conn.execute(text(
@@ -169,34 +161,26 @@ class DatabaseMonitor:
                     )).scalar()
                     metrics["connection_count"] = result or 0
                 elif self.engine.dialect.name == 'sqlite':
-                    # SQLite typically has only one connection
                     metrics["connection_count"] = 1
                 else:
-                    # For other dialects, use pool info if available
                     metrics["connection_count"] = getattr(self.engine.pool, "checkedout", 0)
 
-                # Get record counts for all tables - use a single transaction
+                # Get record counts for all tables - always use estimation for PostgreSQL for performance
                 for table_name in self.schema_info["tables"]:
                     try:
-                        # Use faster estimation for large tables in PostgreSQL
                         if self.engine.dialect.name == 'postgresql':
-                            # Check if table has more than 100,000 rows first
+                            # Always use estimation for performance
                             size_query = text(f"""
                                 SELECT reltuples::bigint FROM pg_class 
                                 WHERE relname = '{table_name}'
                             """)
                             estimated_size = conn.execute(size_query).scalar() or 0
-                            
-                            # For large tables, use estimation
-                            if estimated_size > 100000:
-                                metrics["record_counts"][table_name] = estimated_size
-                                continue
-                            
-                        # For small tables or other databases, use exact count
-                        count = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar()
-                        metrics["record_counts"][table_name] = count or 0
+                            metrics["record_counts"][table_name] = estimated_size
+                        else:
+                            count = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar()
+                            metrics["record_counts"][table_name] = count or 0
                     except Exception as e:
-                        logger.warning(f"Error counting records in {table_name}: {str(e)}")
+                        logger.error(f"Error counting records in {table_name}: {str(e)}")
                         metrics["record_counts"][table_name] = -1
 
                 # Database-specific metrics
@@ -208,7 +192,7 @@ class DatabaseMonitor:
                     self._collect_sqlite_metrics(conn, metrics)
 
         except Exception as e:
-            logger.error(f"Database connection error: {str(e)}")
+            logger.error(f"Database connection error: {str(e)}", exc_info=True)
             metrics["status"] = "error"
             metrics["error"] = str(e)
 

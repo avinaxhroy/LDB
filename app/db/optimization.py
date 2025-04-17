@@ -81,7 +81,7 @@ class DatabaseOptimizer:
                         "success": False,
                         "error": str(e)
                     })
-                    logger.error(f"Error executing: {query[:50]}... - {str(e)}")
+                    logger.error(f"Error executing: {query[:50]}... - {str(e)}", exc_info=True)
             results[category] = category_results
         return results
 
@@ -110,7 +110,7 @@ class DatabaseOptimizer:
                     "success": False,
                     "error": str(e)
                 }
-                logger.error(f"Error caching query: {query[:50]}... - {str(e)}")
+                logger.error(f"Error caching query: {query[:50]}... - {str(e)}", exc_info=True)
         return results
 
 # Create singleton instance

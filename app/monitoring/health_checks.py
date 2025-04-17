@@ -323,19 +323,8 @@ def check_dependencies() -> bool:
             missing_packages.append(package)
 
     if missing_packages:
-        logger.warning(f"Missing dependencies: {', '.join(missing_packages)}")
-        try:
-            # Install missing packages without version constraints
-            for package in missing_packages:
-                try:
-                    logger.info(f"Installing {package}...")
-                    subprocess.check_call(["pip", "install", package])
-                except subprocess.CalledProcessError as e:
-                    logger.error(f"Failed to install {package}: {str(e)}")
-                    return False
-        except Exception as e:
-            logger.error(f"Error installing dependencies: {str(e)}")
-            return False
+        logger.error(f"Missing dependencies: {', '.join(missing_packages)}. Please install them using requirements.txt before running the application.")
+        return False
 
     logger.info("All health check dependencies are available")
     return True
