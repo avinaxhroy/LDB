@@ -116,33 +116,64 @@ class DashboardConfig:
     
     # Dynamic configuration
     def __init__(self):
-        # Removed Windows-specific paths and ensured compatibility with Linux
-        self.log_paths = [
+        # Add support for both Linux and Windows log paths
+        self.log_paths = []
+        
+        # Linux default log paths
+        linux_log_paths = [
             '/var/log/ldb/out.log',
             '/var/log/ldb/err.log',
             '/var/log/ldb/dashboard_out.log',
             '/var/log/ldb/dashboard_err.log'
         ]
+        
+        # Windows default log paths (using current dir or temp dir)
+        windows_log_paths = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'logs', 'app.log'),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'logs', 'error.log'),
+            os.path.join(tempfile.gettempdir(), 'ldb_app.log'),
+            os.path.join(tempfile.gettempdir(), 'ldb_error.log')
+        ]
+        
+        # Set appropriate paths based on platform
+        if platform.system() == 'Windows':
+            self.log_paths = windows_log_paths
+        else:
+            self.log_paths = linux_log_paths
 
-        # Removed fallback for Windows log paths as this is a Linux VPS
-        # Service configurations remain unchanged
+        # Add any application logs from environment variables if available
+        env_log_path = os.getenv("APP_LOG_PATH")
+        if env_log_path:
+            self.log_paths.append(env_log_path)
+        
+        # Add the current Python console log as a fallback
+        try:
+            import logging.handlers
+            for handler in logging.getLogger().handlers:
+                if isinstance(handler, logging.handlers.RotatingFileHandler) or isinstance(handler, logging.FileHandler):
+                    if handler.baseFilename:
+                        self.log_paths.append(handler.baseFilename)
+        except Exception:
+            pass
+
+        # Service configurations
         self.supervisor_services = ['ldb', 'ldb_dashboard']
         self.system_services = ['postgresql', 'nginx', 'redis-server', 'supervisor']
 
-        # Database configuration remains unchanged
+        # Database configuration
         self.database_url = self._get_database_url()
 
-        # Application info updated for Linux environment
+        # Application info
         self.app_name = os.getenv("APP_NAME", "Desi Hip-Hop Recommendation System")
         self.app_version = os.getenv("APP_VERSION", "1.0.0")
-        self.app_dir = os.getenv("APP_DIR", "/var/www/ldb")
+        self.app_dir = os.getenv("APP_DIR", "/var/www/ldb" if platform.system() != 'Windows' else os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-        # Network configuration remains unchanged
+        # Network configuration
         self.bind_host = os.getenv("DASHBOARD_HOST", "0.0.0.0")
         self.bind_port = int(os.getenv("DASHBOARD_PORT", "8001"))
         self.allow_external = os.getenv("DASHBOARD_ALLOW_EXTERNAL", "true").lower() in ("true", "yes", "1")
 
-        # CORS settings remain unchanged
+        # CORS settings
         self.cors_origins = os.getenv("DASHBOARD_CORS_ORIGINS", "*")
         
     def _get_database_url(self) -> str:
@@ -317,27 +348,390 @@ class LogCollector:
 
 
 class ServiceMonitor:
-    """Stub for ServiceMonitor to avoid undefined reference."""
+    """Monitors system service status"""
+    
     def __init__(self, config):
         self.config = config
-
+        self.service_history = []
+        self.last_check = {}
+        self.MAX_HISTORY = 100
+        
+    def check_service_status(self, service_name):
+        """Check status of a service using appropriate system commands"""
+        status = "unknown"
+        
+        try:
+            if platform.system() == 'Windows':
+                # Use Windows SC command
+                result = subprocess.run(
+                    ['sc', 'query', service_name],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=5
+                )
+                
+                if result.returncode == 0:
+                    if "RUNNING" in result.stdout:
+                        status = "running"
+                    elif "STOPPED" in result.stdout:
+                        status = "stopped"
+                    elif "START_PENDING" in result.stdout:
+                        status = "starting"
+                    elif "STOP_PENDING" in result.stdout:
+                        status = "stopping"
+                else:
+                    status = "not_found"
+                    
+            else:
+                # Use systemctl for Linux systems
+                if service_name in self.config.supervisor_services:
+                    # Use supervisorctl for supervisor managed services
+                    result = subprocess.run(
+                        ['supervisorctl', 'status', service_name],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=5
+                    )
+                    
+                    if result.returncode == 0:
+                        if "RUNNING" in result.stdout:
+                            status = "running"
+                        elif "STOPPED" in result.stdout:
+                            status = "stopped"
+                        elif "STARTING" in result.stdout:
+                            status = "starting"
+                        elif "STOPPING" in result.stdout:
+                            status = "stopping"
+                        elif "FATAL" in result.stdout:
+                            status = "error"
+                    else:
+                        status = "not_found"
+                else:
+                    # Use systemctl for system services
+                    result = subprocess.run(
+                        ['systemctl', 'is-active', service_name],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=5
+                    )
+                    
+                    status = result.stdout.strip()
+                    if status == "active":
+                        status = "running"
+                    elif status in ["inactive", "dead"]:
+                        status = "stopped"
+                    elif status == "activating":
+                        status = "starting"
+                    elif status == "deactivating":
+                        status = "stopping"
+                    elif status in ["failed", "auto-restart"]:
+                        status = "error"
+                        
+        except Exception as e:
+            logger.error(f"Error checking service {service_name}: {str(e)}")
+            status = "unknown"
+            
+        # Record the status and timestamp
+        timestamp = datetime.now()
+        self.last_check[service_name] = {
+            "status": status,
+            "timestamp": timestamp
+        }
+        
+        # Add to history with compact representation
+        self.service_history.append({
+            "service": service_name,
+            "status": status,
+            "timestamp": timestamp.isoformat()
+        })
+        
+        # Trim history if needed
+        if len(self.service_history) > self.MAX_HISTORY:
+            self.service_history = self.service_history[-self.MAX_HISTORY:]
+            
+        return status
+    
     def get_service_status(self):
-        return {service: "unknown" for service in self.config.system_services}
-
+        """Get current status of all configured services"""
+        # Check each service status and return a dictionary of results
+        result = {}
+        for service in self.config.system_services + self.config.supervisor_services:
+            # Skip duplicates
+            if service in result:
+                continue
+                
+            try:
+                status = self.check_service_status(service)
+                result[service] = status
+            except Exception as e:
+                logger.error(f"Error getting status for service {service}: {e}")
+                result[service] = "error"
+                
+        return result
+    
     def get_service_history(self):
-        return []
+        """Get history of service status changes"""
+        return self.service_history
 
 
 class DebugSessionManager:
-    """Stub for DebugSessionManager to avoid undefined reference."""
+    """Debug session management with real-time monitoring and diagnostics"""
+    
     def __init__(self, config):
         self.config = config
-
+        self.active_session = False
+        self.session_id = None
+        self.session_start_time = None
+        self.session_output = []
+        self.system_snapshots = []
+        self.MAX_OUTPUT = 100  # Maximum number of output lines to store
+        self.MAX_SNAPSHOTS = 10  # Maximum number of system snapshots to keep
+        self.session_thread = None
+        self.running = False
+    
     def start_debug_session(self):
-        return "Debug session started"
-
+        """Start a new debug session with diagnostics"""
+        if self.active_session:
+            return "Debug session already running"
+        
+        # Generate new session ID and record start time
+        self.session_id = f"debug_{int(time.time())}"
+        self.session_start_time = datetime.now()
+        self.active_session = True
+        self.session_output = []
+        self.system_snapshots = []
+        
+        # Add initial output
+        self.add_output(f"Debug session started at {self.session_start_time.isoformat()}")
+        self.add_output(f"Session ID: {self.session_id}")
+        
+        # Start background monitoring
+        self.running = True
+        self.session_thread = threading.Thread(target=self._session_monitoring_thread, daemon=True)
+        self.session_thread.start()
+        
+        # Take an immediate system snapshot
+        self._take_system_snapshot()
+        
+        # Attempt to collect diagnostic information
+        self._collect_diagnostics()
+        
+        return f"Debug session started with ID: {self.session_id}"
+    
     def stop_debug_session(self):
-        return "Debug session stopped"
+        """Stop the current debug session"""
+        if not self.active_session:
+            return "No active debug session"
+        
+        # Stop the background thread
+        self.running = False
+        if self.session_thread and self.session_thread.is_alive():
+            self.session_thread.join(timeout=2)
+        
+        # Take final snapshot
+        self._take_system_snapshot()
+        
+        # Calculate session duration
+        end_time = datetime.now()
+        duration = end_time - self.session_start_time
+        
+        # Add final output
+        self.add_output(f"Debug session stopped at {end_time.isoformat()}")
+        self.add_output(f"Session duration: {duration}")
+        
+        # Generate debug report
+        report = self._generate_debug_report()
+        self.add_output("Debug report generated")
+        
+        # Keep session info but mark as inactive
+        self.active_session = False
+        
+        return f"Debug session {self.session_id} stopped"
+    
+    def get_session_status(self):
+        """Get current debug session status and output"""
+        if not self.active_session and not self.session_id:
+            return {
+                "active": False,
+                "output": ["No debug session has been started"]
+            }
+        
+        # Return session status
+        return {
+            "active": self.active_session,
+            "session_id": self.session_id,
+            "start_time": self.session_start_time.isoformat() if self.session_start_time else None,
+            "output": self.session_output,
+            "snapshots": len(self.system_snapshots)
+        }
+    
+    def add_output(self, message):
+        """Add output to the current debug session"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        output_line = f"[{timestamp}] {message}"
+        self.session_output.append(output_line)
+        
+        # Limit the output size
+        if len(self.session_output) > self.MAX_OUTPUT:
+            self.session_output = self.session_output[-self.MAX_OUTPUT:]
+    
+    def _session_monitoring_thread(self):
+        """Background thread to periodically collect system metrics"""
+        while self.running:
+            try:
+                # Take a system snapshot every 30 seconds
+                self._take_system_snapshot()
+                
+                # Sleep for 30 seconds
+                for _ in range(30):
+                    if not self.running:
+                        break
+                    time.sleep(1)
+            except Exception as e:
+                self.add_output(f"Error in monitoring thread: {str(e)}")
+                time.sleep(5)
+    
+    def _take_system_snapshot(self):
+        """Take a snapshot of current system metrics"""
+        try:
+            # Get CPU, memory, disk usage
+            cpu_percent = psutil.cpu_percent(interval=1)
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
+            
+            # Get top processes by CPU and memory
+            processes = []
+            for proc in psutil.process_iter(['pid', 'name', 'username', 'cpu_percent', 'memory_percent']):
+                try:
+                    pinfo = proc.info
+                    processes.append(pinfo)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+            
+            # Sort processes by CPU usage (descending)
+            processes.sort(key=lambda x: x.get('cpu_percent', 0), reverse=True)
+            top_cpu_processes = processes[:5]
+            
+            # Sort processes by memory usage (descending)
+            processes.sort(key=lambda x: x.get('memory_percent', 0), reverse=True)
+            top_memory_processes = processes[:5]
+            
+            # Create snapshot
+            snapshot = {
+                "timestamp": datetime.now().isoformat(),
+                "cpu_percent": cpu_percent,
+                "memory_percent": memory.percent,
+                "memory_used": memory.used,
+                "memory_total": memory.total,
+                "disk_percent": disk.percent,
+                "disk_used": disk.used,
+                "disk_total": disk.total,
+                "top_cpu_processes": [
+                    {"pid": p.get('pid', 0), 
+                     "name": p.get('name', 'unknown'), 
+                     "cpu_percent": p.get('cpu_percent', 0)} 
+                    for p in top_cpu_processes
+                ],
+                "top_memory_processes": [
+                    {"pid": p.get('pid', 0), 
+                     "name": p.get('name', 'unknown'), 
+                     "memory_percent": p.get('memory_percent', 0)} 
+                    for p in top_memory_processes
+                ]
+            }
+            
+            # Add snapshot to list
+            self.system_snapshots.append(snapshot)
+            
+            # Limit the number of snapshots
+            if len(self.system_snapshots) > self.MAX_SNAPSHOTS:
+                self.system_snapshots = self.system_snapshots[-self.MAX_SNAPSHOTS:]
+            
+            # Add output if active session
+            if self.active_session:
+                self.add_output(f"System snapshot: CPU {cpu_percent}%, Memory {memory.percent}%, Disk {disk.percent}%")
+        
+        except Exception as e:
+            logger.error(f"Error taking system snapshot: {str(e)}")
+            if self.active_session:
+                self.add_output(f"Error taking system snapshot: {str(e)}")
+    
+    def _collect_diagnostics(self):
+        """Collect diagnostic information about the system"""
+        try:
+            self.add_output("Collecting diagnostic information...")
+            
+            # Check Python version
+            self.add_output(f"Python version: {sys.version}")
+            
+            # Check available memory
+            memory = psutil.virtual_memory()
+            self.add_output(f"Memory: {memory.percent}% used ({memory.used / (1024 * 1024):.1f} MB / {memory.total / (1024 * 1024):.1f} MB)")
+            
+            # Check disk space
+            disk = psutil.disk_usage('/')
+            self.add_output(f"Disk: {disk.percent}% used ({disk.used / (1024 * 1024 * 1024):.1f} GB / {disk.total / (1024 * 1024 * 1024):.1f} GB)")
+            
+            # Check network interfaces
+            network_info = []
+            for interface, addrs in psutil.net_if_addrs().items():
+                for addr in addrs:
+                    if addr.family == socket.AF_INET:
+                        network_info.append(f"{interface}: {addr.address}")
+            
+            if network_info:
+                self.add_output("Network interfaces:")
+                for info in network_info:
+                    self.add_output(f"  - {info}")
+            
+            # Check environment variables
+            self.add_output("Checking environment variables...")
+            important_vars = ['PATH', 'PYTHONPATH', 'APP_DIR', 'DATABASE_URL']
+            for var in important_vars:
+                value = os.getenv(var)
+                self.add_output(f"  - {var}: {value if value else 'Not set'}")
+            
+            # Check for database connection
+            self.add_output("Checking database connection...")
+            try:
+                if self.config.database_url:
+                    db_engine = create_engine(self.config.database_url)
+                    with db_engine.connect() as conn:
+                        self.add_output("Database connection successful")
+                else:
+                    self.add_output("No database URL configured")
+            except Exception as e:
+                self.add_output(f"Database connection failed: {str(e)}")
+            
+            # Check for log files
+            self.add_output("Checking log files...")
+            for log_path in self.config.log_paths:
+                if os.path.exists(log_path):
+                    size = os.path.getsize(log_path)
+                    modified = datetime.fromtimestamp(os.path.getmtime(log_path)).isoformat()
+                    self.add_output(f"  - {log_path}: {size / 1024:.1f} KB, last modified: {modified}")
+                else:
+                    self.add_output(f"  - {log_path}: Not found")
+            
+            self.add_output("Diagnostic information collected")
+            
+        except Exception as e:
+            logger.error(f"Error collecting diagnostics: {str(e)}")
+            self.add_output(f"Error collecting diagnostics: {str(e)}")
+    
+    def _generate_debug_report(self):
+        """Generate a debug report from the current session"""
+        # This could be expanded to create a downloadable report file
+        return {
+            "session_id": self.session_id,
+            "start_time": self.session_start_time.isoformat() if self.session_start_time else None,
+            "end_time": datetime.now().isoformat(),
+            "output": self.session_output,
+            "snapshots": self.system_snapshots
+        }
 
 
 class Dashboard:
@@ -561,6 +955,8 @@ class Dashboard:
         @self.app.route('/api/logs')
         def api_logs():
             """API endpoint to get logs"""
+            # Force a fresh collection of logs
+            self.log_collector.collect_logs()
             return jsonify(self.log_collector.get_logs())
         
         @self.app.route('/api/errors')
@@ -616,6 +1012,37 @@ class Dashboard:
                 },
                 "connectivity": connection_tests
             })
+        
+        # Debug session management endpoints
+        @self.app.route('/api/debug/start', methods=['POST'])
+        def api_debug_start():
+            """API endpoint to start a debug session"""
+            try:
+                result = self.debug_manager.start_debug_session()
+                return jsonify({"status": "success", "message": result})
+            except Exception as e:
+                logger.error(f"Error starting debug session: {e}")
+                return jsonify({"status": "error", "message": str(e)})
+        
+        @self.app.route('/api/debug/stop', methods=['POST'])
+        def api_debug_stop():
+            """API endpoint to stop a debug session"""
+            try:
+                result = self.debug_manager.stop_debug_session()
+                return jsonify({"status": "success", "message": result})
+            except Exception as e:
+                logger.error(f"Error stopping debug session: {e}")
+                return jsonify({"status": "error", "message": str(e)})
+        
+        @self.app.route('/api/debug/status')
+        def api_debug_status():
+            """API endpoint to get debug session status"""
+            try:
+                status = self.debug_manager.get_session_status()
+                return jsonify(status)
+            except Exception as e:
+                logger.error(f"Error getting debug status: {e}")
+                return jsonify({"status": "error", "message": str(e)})
             
         @self.app.route('/status')
         def status():
@@ -1471,42 +1898,126 @@ class Dashboard:
                     const startDebugBtn = document.getElementById('start-debug');
                     const stopDebugBtn = document.getElementById('stop-debug');
                     const debugOutput = document.getElementById('debug-output');
+                    let debugStatusInterval;
+                    
+                    // Check and update the debug session status
+                    function updateDebugStatus() {
+                        fetch('/api/debug/status')
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.active) {
+                                    startDebugBtn.disabled = true;
+                                    stopDebugBtn.disabled = false;
+                                    debugOutput.style.display = 'block';
+                                    
+                                    // Update the output with the latest logs
+                                    if (data.output && data.output.length > 0) {
+                                        debugOutput.innerHTML = '';
+                                        data.output.forEach(line => {
+                                            debugOutput.innerHTML += `<div class="log-line">${line}</div>`;
+                                        });
+                                        // Auto-scroll to bottom
+                                        debugOutput.scrollTop = debugOutput.scrollHeight;
+                                    }
+                                } else {
+                                    // If we have a session ID but it's not active, show the output
+                                    if (data.session_id) {
+                                        startDebugBtn.disabled = false;
+                                        stopDebugBtn.disabled = true;
+                                        debugOutput.style.display = 'block';
+                                        // Keep existing output
+                                    } else {
+                                        // No session has been started
+                                        startDebugBtn.disabled = false;
+                                        stopDebugBtn.disabled = true;
+                                        // Keep default output
+                                    }
+                                }
+                            })
+                            .catch(error => {
+                                console.error('Error getting debug status:', error);
+                            });
+                    }
+                    
+                    // Initial check for debug status
+                    updateDebugStatus();
                     
                     if (startDebugBtn && stopDebugBtn) {
                         startDebugBtn.addEventListener('click', function() {
+                            // Disable buttons during API call
                             startDebugBtn.disabled = true;
-                            stopDebugBtn.disabled = false;
-                            debugOutput.style.display = 'block';
-                            debugOutput.innerHTML = '<p>Debug session started...</p>';
                             
-                            // Here you would typically call an API endpoint to start a debug session
-                            // For demonstration, we'll just update the UI
+                            // Call API to start debug session
+                            fetch('/api/debug/start', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json'
+                                }
+                            })
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.status === 'success') {
+                                    // Update UI
+                                    stopDebugBtn.disabled = false;
+                                    debugOutput.style.display = 'block';
+                                    debugOutput.innerHTML = '<div class="log-line">Starting debug session...</div>';
+                                    
+                                    // Start periodic status updates
+                                    if (!debugStatusInterval) {
+                                        debugStatusInterval = setInterval(updateDebugStatus, 2000);
+                                    }
+                                } else {
+                                    // Handle error
+                                    startDebugBtn.disabled = false;
+                                    debugOutput.style.display = 'block';
+                                    debugOutput.innerHTML = `<div class="log-line log-error">Error: ${data.message}</div>`;
+                                }
+                            })
+                            .catch(error => {
+                                console.error('Error starting debug session:', error);
+                                startDebugBtn.disabled = false;
+                                debugOutput.style.display = 'block';
+                                debugOutput.innerHTML = `<div class="log-line log-error">Error starting debug session: ${error}</div>`;
+                            });
                         });
                         
                         stopDebugBtn.addEventListener('click', function() {
-                            startDebugBtn.disabled = false;
+                            // Disable button during API call
                             stopDebugBtn.disabled = true;
-                            debugOutput.innerHTML += '<p>Debug session stopped.</p>';
                             
-                            // Here you would typically call an API endpoint to stop a debug session
+                            // Call API to stop debug session
+                            fetch('/api/debug/stop', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json'
+                                }
+                            })
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.status === 'success') {
+                                    // Update UI
+                                    startDebugBtn.disabled = false;
+                                    debugOutput.innerHTML += '<div class="log-line">Debug session stopped.</div>';
+                                    
+                                    // Stop periodic status updates
+                                    clearInterval(debugStatusInterval);
+                                    debugStatusInterval = null;
+                                    
+                                    // Get final status once
+                                    setTimeout(updateDebugStatus, 1000);
+                                } else {
+                                    // Handle error
+                                    stopDebugBtn.disabled = false;
+                                    debugOutput.innerHTML += `<div class="log-line log-error">Error: ${data.message}</div>`;
+                                }
+                            })
+                            .catch(error => {
+                                console.error('Error stopping debug session:', error);
+                                stopDebugBtn.disabled = false;
+                                debugOutput.innerHTML += `<div class="log-line log-error">Error stopping debug session: ${error}</div>`;
+                            });
                         });
                     }
-                    
-                    // Initial data load
-                    updateMetrics();
-                    fetchLogs();
-                    fetchDatabaseInfo();
-                    fetchHealthChecks();
-                    fetchApplicationMetrics();
-                    fetchNetworkInfo();
-                    
-                    // Set up periodic refreshes
-                    setInterval(updateMetrics, 5000);
-                    setInterval(fetchLogs, 10000);
-                    setInterval(fetchDatabaseInfo, 15000);
-                    setInterval(fetchHealthChecks, 30000);
-                    setInterval(fetchApplicationMetrics, 5000);
-                    setInterval(fetchNetworkInfo, 60000);
                 });
             </script>
         </body>

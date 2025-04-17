@@ -55,28 +55,40 @@ def setup_tracing(app=None, db_engine=None):
         if app and "fastapi" in str(type(app)):
             try:
                 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-                FastAPIInstrumentor.instrument_app(app)
+                # Fix: Create an instance of the instrumentor before calling instrument_app
+                instrumentor = FastAPIInstrumentor()
+                instrumentor.instrument_app(app)
                 logger.info("FastAPI instrumented for tracing")
             except ImportError:
                 logger.warning("OpenTelemetry FastAPI instrumentation not available")
+            except Exception as e:
+                logger.error(f"Error instrumenting FastAPI: {str(e)}")
         
         # Instrument Flask if available
         elif app and "flask" in str(type(app)):
             try:
                 from opentelemetry.instrumentation.flask import FlaskInstrumentor
-                FlaskInstrumentor.instrument_app(app)
+                # Fix: Create an instance of the instrumentor before calling instrument_app
+                instrumentor = FlaskInstrumentor()
+                instrumentor.instrument_app(app)
                 logger.info("Flask instrumented for tracing")
             except ImportError:
                 logger.warning("OpenTelemetry Flask instrumentation not available")
+            except Exception as e:
+                logger.error(f"Error instrumenting Flask: {str(e)}")
         
         # Instrument SQLAlchemy if available
         if db_engine:
             try:
                 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
-                SQLAlchemyInstrumentor.instrument(engine=db_engine)
+                # Fix: Create an instance of the instrumentor before calling instrument
+                instrumentor = SQLAlchemyInstrumentor()
+                instrumentor.instrument(engine=db_engine)
                 logger.info("SQLAlchemy instrumented for tracing")
             except ImportError:
                 logger.warning("OpenTelemetry SQLAlchemy instrumentation not available")
+            except Exception as e:
+                logger.error(f"Error instrumenting SQLAlchemy: {str(e)}")
         
         logger.info("Distributed tracing initialized")
         return _tracer
