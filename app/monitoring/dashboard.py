@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-Enhanced Monitoring Dashboard for Desi Hip-Hop Recommendation System
+Enhanced Monitoring Dashboard for LDB (Desi Hip-Hop Recommendation System)
 
-This dashboard integrates all existing monitoring components:
-- System metrics (CPU, memory, disk)
-- Service status monitoring
-- Database metrics and performance
+This dashboard provides a comprehensive view of system health and performance:
+- System metrics (CPU, memory, disk usage)
+- Service status monitoring and management
+- Database metrics and performance analytics
 - Log collection and error tracking
-- Debug session management
-- Application telemetry
+- Debug session management and troubleshooting
+- Network diagnostics and connectivity testing
+- Application performance telemetry
+
+Usage:
+  python -m app.monitoring.dashboard [--host HOST] [--port PORT] [--debug]
 """
 import os
 import sys
