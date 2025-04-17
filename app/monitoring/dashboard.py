@@ -283,83 +283,239 @@ class ServiceMonitor:
     def __init__(self, config: DashboardConfig):
         self.config = config
         self.service_history = defaultdict(list)
+        self.available_tools = self._detect_available_tools()
+        self.last_error_time = {}
+        logger.info(f"Available service management tools: {', '.join(self.available_tools) or 'none'}")
     
+    def _detect_available_tools(self):
+        """Detect which service management tools are available"""
+        available = []
+        
+        # Check for systemctl
+        try:
+            subprocess.run(
+                ["systemctl", "--version"], 
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False
+            )
+            available.append("systemctl")
+        except (subprocess.SubprocessError, FileNotFoundError):
+            pass
+            
+        # Check for supervisorctl
+        try:
+            subprocess.run(
+                ["supervisorctl", "version"], 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                check=False
+            )
+            available.append("supervisorctl")
+        except (subprocess.SubprocessError, FileNotFoundError):
+            pass
+        
+        # Check for service command
+        try:
+            subprocess.run(
+                ["service", "--version"], 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                check=False
+            )
+            available.append("service")
+        except (subprocess.SubprocessError, FileNotFoundError):
+            pass
+            
+        # Check for sc.exe on Windows
+        if platform.system() == 'Windows':
+            try:
+                subprocess.run(
+                    ["sc", "query", "state=all"], 
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.PIPE,
+                    check=False
+                )
+                available.append("sc")
+            except (subprocess.SubprocessError, FileNotFoundError):
+                pass
+        
+        return available
+
     def check_services(self):
         """Check the status of critical services"""
         try:
-            # Check system services
+            if not self.available_tools:
+                self._check_services_by_process()
+                return
+
             for service in self.config.system_services:
                 status = self._check_service_status(service)
-                
-                # Store in history
                 self.service_history[service].append({
                     "status": status,
                     "time": datetime.now().isoformat()
                 })
-                
-                # Keep last 20 status checks
                 if len(self.service_history[service]) > 20:
                     self.service_history[service] = self.service_history[service][-20:]
             
-            # Check supervised services
             for service in self.config.supervisor_services:
-                status = self._check_service_status(service)
-                
-                # Store in history
+                status = self._check_service_status(service, is_supervisor=True)
                 self.service_history[service].append({
                     "status": status,
                     "time": datetime.now().isoformat()
                 })
-                
-                # Keep last 20 status checks
                 if len(self.service_history[service]) > 20:
                     self.service_history[service] = self.service_history[service][-20:]
         
         except Exception as e:
-            logger.error(f"Error checking services: {str(e)}")
+            now = datetime.now()
+            last_time = self.last_error_time.get('check_services')
+            if not last_time or (now - last_time).total_seconds() > 60:
+                logger.error(f"Error checking services: {str(e)}")
+                self.last_error_time['check_services'] = now
     
-    def _check_service_status(self, service_name):
-        """Check if a service is running using systemctl or supervisorctl with platform compatibility"""
+    def _check_services_by_process(self):
+        """Check services by looking for relevant processes when service tools are unavailable"""
+        service_process_mapping = {
+            'postgresql': ['postgres', 'postgresql'],
+            'nginx': ['nginx'],
+            'redis-server': ['redis-server', 'redis'],
+            'supervisor': ['supervisord'],
+            'ldb': ['ldb', 'gunicorn', 'uvicorn', 'python'],
+            'ldb_dashboard': ['dashboard', 'flask']
+        }
+        
         try:
-            if platform.system() == 'Windows':
-                # On Windows, use sc.exe to query services
-                if service_name == 'postgresql':
-                    service_name = 'postgresql-x64-14'  # Common PostgreSQL service name on Windows
+            running_processes = set()
+            for proc in psutil.process_iter(['name', 'cmdline']):
+                try:
+                    proc_info = proc.info
+                    if proc_info['name']:
+                        running_processes.add(proc_info['name'].lower())
+                    if proc_info['cmdline']:
+                        cmdline = ' '.join(proc_info['cmdline']).lower()
+                        for keyword in ['ldb', 'dashboard', 'gunicorn', 'uvicorn', 'flask']:
+                            if keyword in cmdline:
+                                running_processes.add(keyword)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
                 
-                result = subprocess.run(
-                    ['sc', 'query', service_name],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace'
-                )
+            all_services = self.config.system_services + self.config.supervisor_services
+            for service in all_services:
+                status = "inactive"
+                for process_name in service_process_mapping.get(service, [service]):
+                    if process_name.lower() in running_processes:
+                        status = "active" 
+                        break
                 
-                if result.returncode == 0:
-                    if 'RUNNING' in result.stdout:
-                        return 'active'
-                    else:
-                        return 'inactive'
-                return 'not-found'
-            else:
-                # Linux systems
-                if service_name in self.config.supervisor_services:
-                    # Check supervisor services
+                self.service_history[service].append({
+                    "status": status,
+                    "time": datetime.now().isoformat()
+                })
+                if len(self.service_history[service]) > 20:
+                    self.service_history[service] = self.service_history[service][-20:]
+        except Exception as e:
+            now = datetime.now()
+            last_time = self.last_error_time.get('check_processes')
+            if not last_time or (now - last_time).total_seconds() > 60:
+                logger.error(f"Error checking services by process: {str(e)}")
+                self.last_error_time['check_processes'] = now
+            
+            all_services = self.config.system_services + self.config.supervisor_services
+            for service in all_services:
+                self.service_history[service].append({
+                    "status": "unknown",
+                    "time": datetime.now().isoformat()
+                })
+    
+    def _check_service_status(self, service_name, is_supervisor=False):
+        now = datetime.now()
+        error_key = f"check_{service_name}"
+        last_time = self.last_error_time.get(error_key)
+        if last_time and (now - last_time).total_seconds() < 60:
+            if service_name in self.service_history and self.service_history[service_name]:
+                return self.service_history[service_name][-1]["status"]
+            return "unknown"
+        
+        try:
+            if is_supervisor and "supervisorctl" in self.available_tools:
+                try:
                     output = subprocess.check_output(
-                        f"supervisorctl status {service_name}", shell=True).decode('utf-8', errors='replace')
+                        ["supervisorctl", "status", service_name], 
+                        stderr=subprocess.STDOUT,
+                        timeout=5
+                    ).decode('utf-8', errors='replace')
                     status_match = re.search(r'RUNNING|STOPPED|STARTING|BACKOFF|STOPPING|EXITED|FATAL|UNKNOWN', output)
                     return status_match.group(0) if status_match else "UNKNOWN"
-                else:
-                    # Check system services
+                except subprocess.SubprocessError as e:
+                    if getattr(e, 'output', None):
+                        output = e.output.decode('utf-8', errors='replace')
+                        if "no such process" in output.lower():
+                            return "not-found"
+                    self.last_error_time[error_key] = now
+                    return "error"
+            
+            if not is_supervisor and "systemctl" in self.available_tools:
+                try:
                     output = subprocess.check_output(
-                        f"systemctl is-active {service_name}", shell=True).decode('utf-8', errors='replace').strip()
+                        ["systemctl", "is-active", service_name],
+                        stderr=subprocess.STDOUT,
+                        timeout=5
+                    ).decode('utf-8', errors='replace').strip()
                     return output
+                except subprocess.SubprocessError as e:
+                    if getattr(e, 'output', None):
+                        output = e.output.decode('utf-8', errors='replace')
+                        if "not-found" in output:
+                            return "not-found"
+                    self.last_error_time[error_key] = now
+                    return "inactive"
+            
+            if not is_supervisor and "service" in self.available_tools:
+                try:
+                    subprocess.check_output(
+                        ["service", service_name, "status"],
+                        stderr=subprocess.STDOUT,
+                        timeout=5
+                    )
+                    return "active"
+                except subprocess.SubprocessError:
+                    return "inactive"
+            
+            if platform.system() == 'Windows' and "sc" in self.available_tools:
+                try:
+                    if service_name == 'postgresql':
+                        service_name = 'postgresql-x64-14'
+                    
+                    result = subprocess.run(
+                        ['sc', 'query', service_name],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        timeout=5
+                    )
+                    
+                    if result.returncode == 0:
+                        if 'RUNNING' in result.stdout:
+                            return 'active'
+                        else:
+                            return 'inactive'
+                    return 'not-found'
+                except subprocess.SubprocessError:
+                    self.last_error_time[error_key] = now
+                    return "error"
+            
+            return "unknown"
+            
         except Exception as e:
-            logger.error(f"Error checking service {service_name}: {str(e)}")
+            if not last_time or (now - last_time).total_seconds() > 60:
+                logger.error(f"Error checking service {service_name}: {str(e)}")
+                self.last_error_time[error_key] = now
             return "error"
     
     def get_service_status(self) -> List[Dict[str, Any]]:
-        """Get current service status"""
         result = []
         
         all_services = self.config.system_services + self.config.supervisor_services
@@ -380,7 +536,6 @@ class ServiceMonitor:
         return result
     
     def get_service_history(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Get service history"""
         return dict(self.service_history)
 
 
