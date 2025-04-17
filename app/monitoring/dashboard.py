@@ -380,6 +380,48 @@ class ServiceMonitor:
         self.last_check = {}
         self.MAX_HISTORY = 100
         
+        # Check for command availability
+        self._systemctl_path = self._check_command_exists('systemctl')
+        self._supervisorctl_path = self._check_command_exists('supervisorctl')
+        
+        if not self._systemctl_path:
+            logger.warning("systemctl not found - system service monitoring will be limited")
+        if not self._supervisorctl_path:
+            logger.warning("supervisorctl not found - supervisor service monitoring will be limited")
+    
+    def _check_command_exists(self, command):
+        """Check if a command exists and return its full path if found"""
+        try:
+            # Try common locations for the commands
+            if platform.system() == 'Windows':
+                # Windows doesn't typically have these commands
+                return None
+            else:
+                # Check in common bin directories
+                for path in ['/bin', '/usr/bin', '/usr/local/bin', '/sbin', '/usr/sbin']:
+                    cmd_path = os.path.join(path, command)
+                    if os.path.exists(cmd_path) and os.access(cmd_path, os.X_OK):
+                        logger.info(f"Found {command} at {cmd_path}")
+                        return cmd_path
+                
+                # If not found in common paths, use 'which' command as fallback
+                try:
+                    result = subprocess.run(['which', command], 
+                                          capture_output=True, 
+                                          text=True, 
+                                          check=False)
+                    if result.returncode == 0 and result.stdout.strip():
+                        cmd_path = result.stdout.strip()
+                        logger.info(f"Found {command} at {cmd_path}")
+                        return cmd_path
+                except:
+                    pass
+                
+                return None
+        except Exception as e:
+            logger.error(f"Error checking command existence for {command}: {e}")
+            return None
+        
     def check_service_status(self, service_name):
         """Check status of a service using appropriate system commands"""
         status = "unknown"
@@ -411,48 +453,56 @@ class ServiceMonitor:
                 # Use systemctl for Linux systems
                 if service_name in self.config.supervisor_services:
                     # Use supervisorctl for supervisor managed services
-                    result = subprocess.run(
-                        ['supervisorctl', 'status', service_name],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        timeout=5
-                    )
-                    
-                    if result.returncode == 0:
-                        if "RUNNING" in result.stdout:
-                            status = "running"
-                        elif "STOPPED" in result.stdout:
-                            status = "stopped"
-                        elif "STARTING" in result.stdout:
-                            status = "starting"
-                        elif "STOPPING" in result.stdout:
-                            status = "stopping"
-                        elif "FATAL" in result.stdout:
-                            status = "error"
+                    if self._supervisorctl_path:
+                        result = subprocess.run(
+                            [self._supervisorctl_path, 'status', service_name],
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            timeout=5
+                        )
+                        
+                        if result.returncode == 0:
+                            if "RUNNING" in result.stdout:
+                                status = "running"
+                            elif "STOPPED" in result.stdout:
+                                status = "stopped"
+                            elif "STARTING" in result.stdout:
+                                status = "starting"
+                            elif "STOPPING" in result.stdout:
+                                status = "stopping"
+                            elif "FATAL" in result.stdout:
+                                status = "error"
+                        else:
+                            status = "not_found"
                     else:
-                        status = "not_found"
+                        logger.warning(f"Cannot check supervisor service {service_name} - supervisorctl not found")
+                        status = "check_error"
                 else:
                     # Use systemctl for system services
-                    result = subprocess.run(
-                        ['systemctl', 'is-active', service_name],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        timeout=5
-                    )
-                    
-                    status = result.stdout.strip()
-                    if status == "active":
-                        status = "running"
-                    elif status in ["inactive", "dead"]:
-                        status = "stopped"
-                    elif status == "activating":
-                        status = "starting"
-                    elif status == "deactivating":
-                        status = "stopping"
-                    elif status in ["failed", "auto-restart"]:
-                        status = "error"
+                    if self._systemctl_path:
+                        result = subprocess.run(
+                            [self._systemctl_path, 'is-active', service_name],
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            timeout=5
+                        )
+                        
+                        output = result.stdout.strip()
+                        if output == "active":
+                            status = "running"
+                        elif output in ["inactive", "dead"]:
+                            status = "stopped"
+                        elif output == "activating":
+                            status = "starting"
+                        elif output == "deactivating":
+                            status = "stopping"
+                        elif output in ["failed", "auto-restart"]:
+                            status = "error"
+                    else:
+                        logger.warning(f"Cannot check system service {service_name} - systemctl not found")
+                        status = "check_error"
                         
         except Exception as e:
             logger.error(f"Error checking service {service_name}: {str(e)}")
@@ -1048,41 +1098,58 @@ class Dashboard:
         # Add application metrics for music pipeline
         if self.app_metrics:
             try:
-                # Register custom business metrics for the music pipeline
-                self.app_metrics.register_counter("pipeline_events", "Total music pipeline events processed")
-                self.app_metrics.register_counter("pipeline_errors", "Total errors in music pipeline")
-                self.app_metrics.register_histogram("llm_analysis_time", "Time taken for LLM analysis in seconds")
-                self.app_metrics.register_gauge("pipeline_queue_size", "Current size of the music pipeline queue")
-                self.app_metrics.register_gauge("llm_model_load", "Current load on the LLM model")
-                self.app_metrics.register_counter("artist_discovery", "New artists discovered by collectors", ["source"])
-                self.app_metrics.register_counter("enrichment_operations", "Enrichment operations performed", ["service"])
-                
-                # Add some demo metrics if they don't exist
-                if not hasattr(self.app_metrics, '_demo_metrics_added'):
-                    # Add some demo metrics
-                    self.app_metrics.track_recommendation("personalized")
-                    self.app_metrics.track_recommendation("trending")
-                    self.app_metrics.track_search("artist")
-                    self.app_metrics.track_search("song")
-                    self.app_metrics.set_recommendation_quality(0.85, "personalized")
+                # Register custom business metrics for the music pipeline - using a safer approach
+                # Check if the methods exist before calling them
+                if hasattr(self.app_metrics, 'register_counter'):
+                    self.app_metrics.register_counter("pipeline_events", "Total music pipeline events processed")
+                    self.app_metrics.register_counter("pipeline_errors", "Total errors in music pipeline")
+                    self.app_metrics.register_counter("artist_discovery", "New artists discovered by collectors", ["source"])
+                    self.app_metrics.register_counter("enrichment_operations", "Enrichment operations performed", ["service"])
                     
-                    # Track pipeline metrics with example values
-                    self.app_metrics.increment_counter("pipeline_events", 157)
-                    self.app_metrics.increment_counter("pipeline_errors", 3)
-                    self.app_metrics.observe_histogram("llm_analysis_time", 0.532)
-                    self.app_metrics.set_gauge("pipeline_queue_size", 45)
-                    self.app_metrics.set_gauge("llm_model_load", 0.37)
-                    self.app_metrics.increment_counter("artist_discovery", 27, {"source": "youtube"})
-                    self.app_metrics.increment_counter("artist_discovery", 18, {"source": "instagram"})
-                    self.app_metrics.increment_counter("enrichment_operations", 112, {"service": "spotify"})
-                    self.app_metrics.increment_counter("enrichment_operations", 98, {"service": "lyrics"})
+                if hasattr(self.app_metrics, 'register_histogram'):
+                    self.app_metrics.register_histogram("llm_analysis_time", "Time taken for LLM analysis in seconds")
+                
+                if hasattr(self.app_metrics, 'register_gauge'):
+                    self.app_metrics.register_gauge("pipeline_queue_size", "Current size of the music pipeline queue")
+                    self.app_metrics.register_gauge("llm_model_load", "Current load on the LLM model")
+                
+                # Add some demo metrics if they don't exist and if the methods exist
+                if not hasattr(self.app_metrics, '_demo_metrics_added'):
+                    # Add some demo metrics using safer approach - check for methods first
+                    if hasattr(self.app_metrics, 'track_recommendation'):
+                        self.app_metrics.track_recommendation("personalized")
+                        self.app_metrics.track_recommendation("trending")
+                    
+                    if hasattr(self.app_metrics, 'track_search'):
+                        self.app_metrics.track_search("artist")
+                        self.app_metrics.track_search("song")
+                    
+                    if hasattr(self.app_metrics, 'set_recommendation_quality'):
+                        self.app_metrics.set_recommendation_quality(0.85, "personalized")
+                    
+                    # Track pipeline metrics with example values - check methods first
+                    if hasattr(self.app_metrics, 'increment_counter'):
+                        self.app_metrics.increment_counter("pipeline_events", 157)
+                        self.app_metrics.increment_counter("pipeline_errors", 3)
+                        self.app_metrics.increment_counter("artist_discovery", 27, {"source": "youtube"})
+                        self.app_metrics.increment_counter("artist_discovery", 18, {"source": "instagram"})
+                        self.app_metrics.increment_counter("enrichment_operations", 112, {"service": "spotify"})
+                        self.app_metrics.increment_counter("enrichment_operations", 98, {"service": "lyrics"})
+                    
+                    if hasattr(self.app_metrics, 'observe_histogram'):
+                        self.app_metrics.observe_histogram("llm_analysis_time", 0.532)
+                    
+                    if hasattr(self.app_metrics, 'set_gauge'):
+                        self.app_metrics.set_gauge("pipeline_queue_size", 45)
+                        self.app_metrics.set_gauge("llm_model_load", 0.37)
                     
                     # Mark that we've added demo metrics
                     setattr(self.app_metrics, '_demo_metrics_added', True)
                     logger.info("Added business logic application metrics for music pipeline")
             except Exception as e:
                 logger.error(f"Error adding application metrics: {e}", exc_info=True)
-                
+                logger.warning("Application metrics may not be fully available - using defaults if needed")
+
         # Verify that all exporters are properly initialized
         try:
             from app.monitoring.exporters.prometheus import PrometheusExporter
@@ -1250,13 +1317,18 @@ class Dashboard:
                 # Get health check results from the health check service
                 if self.health_check:
                     try:
-                        health_checks = self.health_check.run_all_checks()
+                        # Use a single standard method name for health checks
+                        if hasattr(self.health_check, 'run_all_checks'):
+                            health_checks = self.health_check.run_all_checks()
+                        else:
+                            logger.warning("Health check service does not have run_all_checks method")
+                            health_checks = {}
                     except Exception as e:
                         logger.error(f"Error running health checks: {e}", exc_info=True)
-                        health_checks = {"error": str(e)}
+                        health_checks = {}
                 
-                # If we don't have proper health checks, add basic ones
-                if not health_checks or isinstance(health_checks, dict) and "error" in health_checks:
+                # If no health checks were retrieved, use basic ones
+                if not health_checks:
                     health_checks = {
                         "system": self._basic_system_health_check(),
                         "database": self._basic_database_health_check(),
