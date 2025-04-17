@@ -751,6 +751,276 @@ def monitor_debug_process(session_id, process):
         except Exception as e:
             logger.error(f"Error cleaning up debug files: {str(e)}")
 
+def initialize_dashboard(app):
+    """Initialize the dashboard with routes, metrics collection, and HTML templates"""
+    # Start metrics collection thread
+    metrics_thread = threading.Thread(target=collect_metrics)
+    metrics_thread.daemon = True
+    metrics_thread.start()
+    
+    # HTML template for the dashboard (minimalistic for now)
+    @app.route('/')
+    def dashboard_home():
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>LDB Monitoring Dashboard</title>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+                .container { max-width: 1200px; margin: 0 auto; }
+                h1 { color: #333; }
+                .card { background: #f9f9f9; border-radius: 4px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                .metrics { display: flex; flex-wrap: wrap; gap: 20px; }
+                .metric-box { flex: 1; min-width: 200px; background: #fff; padding: 15px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+                .metric-title { font-weight: bold; margin-bottom: 10px; }
+                .metric-value { font-size: 24px; color: #0066cc; }
+                .log-container { background: #2b2b2b; color: #f0f0f0; padding: 15px; border-radius: 4px; font-family: monospace; height: 300px; overflow: auto; }
+                .error { color: #ff5555; }
+                table { width: 100%; border-collapse: collapse; }
+                th, td { text-align: left; padding: 8px; border-bottom: 1px solid #ddd; }
+                th { background-color: #f2f2f2; }
+                .status-active { color: green; }
+                .status-inactive { color: red; }
+            </style>
+            <script>
+                // JavaScript to fetch updated metrics periodically
+                function fetchMetrics() {
+                    fetch('/api/metrics')
+                        .then(response => response.json())
+                        .then(data => updateDashboard(data))
+                        .catch(error => console.error('Error fetching metrics:', error));
+                }
+                
+                function updateDashboard(data) {
+                    document.getElementById('cpu-usage').textContent = data.cpu_percent + '%';
+                    document.getElementById('memory-usage').textContent = data.memory_percent + '%';
+                    document.getElementById('disk-usage').textContent = data.disk_percent + '%';
+                    document.getElementById('db-status').textContent = data.db_connection;
+                    
+                    // Update logs
+                    const logsContainer = document.getElementById('logs');
+                    logsContainer.innerHTML = '';
+                    data.logs.forEach(log => {
+                        const logLine = document.createElement('div');
+                        if (log.includes('ERROR') || log.includes('CRITICAL')) {
+                            logLine.className = 'error';
+                        }
+                        logLine.textContent = log;
+                        logsContainer.appendChild(logLine);
+                    });
+                    
+                    // Auto-scroll logs to bottom
+                    logsContainer.scrollTop = logsContainer.scrollHeight;
+                    
+                    // Update services
+                    const servicesTable = document.getElementById('services-table').getElementsByTagName('tbody')[0];
+                    servicesTable.innerHTML = '';
+                    data.services.forEach(service => {
+                        const row = document.createElement('tr');
+                        const nameCell = document.createElement('td');
+                        nameCell.textContent = service.name;
+                        const statusCell = document.createElement('td');
+                        statusCell.textContent = service.status;
+                        if (service.status === 'active' || service.status === 'RUNNING') {
+                            statusCell.className = 'status-active';
+                        } else {
+                            statusCell.className = 'status-inactive';
+                        }
+                        row.appendChild(nameCell);
+                        row.appendChild(statusCell);
+                        servicesTable.appendChild(row);
+                    });
+                }
+                
+                // Fetch metrics every 10 seconds
+                setInterval(fetchMetrics, 10000);
+                
+                // Initial fetch
+                document.addEventListener('DOMContentLoaded', fetchMetrics);
+            </script>
+        </head>
+        <body>
+            <div class="container">
+                <h1>LDB Monitoring Dashboard</h1>
+                
+                <div class="card">
+                    <h2>System Metrics</h2>
+                    <div class="metrics">
+                        <div class="metric-box">
+                            <div class="metric-title">CPU Usage</div>
+                            <div class="metric-value" id="cpu-usage">-</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-title">Memory Usage</div>
+                            <div class="metric-value" id="memory-usage">-</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-title">Disk Usage</div>
+                            <div class="metric-value" id="disk-usage">-</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-title">Database Connection</div>
+                            <div class="metric-value" id="db-status">-</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h2>Service Status</h2>
+                    <table id="services-table">
+                        <thead>
+                            <tr>
+                                <th>Service</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- Services will be populated here -->
+                        </tbody>
+                    </table>
+                </div>
+                
+                <div class="card">
+                    <h2>Recent Logs</h2>
+                    <div class="log-container" id="logs">
+                        <!-- Logs will be populated here -->
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h2>System Information</h2>
+                    <table>
+                        <tr>
+                            <th>Hostname</th>
+                            <td id="hostname">""" + system_info["hostname"] + """</td>
+                        </tr>
+                        <tr>
+                            <th>Platform</th>
+                            <td id="platform">""" + system_info["platform"] + """</td>
+                        </tr>
+                        <tr>
+                            <th>Python Version</th>
+                            <td id="python-version">""" + system_info["python_version"] + """</td>
+                        </tr>
+                        <tr>
+                            <th>IP Address</th>
+                            <td id="ip-address">""" + system_info["ip_address"] + """</td>
+                        </tr>
+                        <tr>
+                            <th>Started At</th>
+                            <td id="started-at">""" + system_info["started_at"] + """</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+    
+    @app.route('/api/metrics')
+    def api_metrics():
+        """API endpoint to get current metrics"""
+        # Get the latest metrics
+        latest_metrics = {
+            "cpu_percent": metrics_history["cpu"][-1] if metrics_history["cpu"] else 0,
+            "memory_percent": metrics_history["memory"][-1] if metrics_history["memory"] else 0,
+            "disk_percent": metrics_history["disk"][-1] if metrics_history["disk"] else 0,
+            "timestamp": metrics_history["timestamp"][-1] if metrics_history["timestamp"] else "",
+            "db_connection": db_metrics["connection_status"],
+            "logs": live_logs[-20:],  # Last 20 logs
+            "services": []
+        }
+        
+        # Add service statuses
+        for service in SUPERVISOR_SERVICES + SYSTEM_SERVICES:
+            if service in service_history and service_history[service]:
+                latest_metrics["services"].append({
+                    "name": service,
+                    "status": service_history[service][-1]["status"]
+                })
+        
+        return jsonify(latest_metrics)
+    
+    @app.route('/api/history')
+    def api_history():
+        """API endpoint to get metrics history"""
+        return jsonify(metrics_history)
+    
+    @app.route('/api/services')
+    def api_services():
+        """API endpoint to get service history"""
+        return jsonify(service_history)
+    
+    @app.route('/api/db')
+    def api_database():
+        """API endpoint to get database metrics"""
+        return jsonify(db_metrics)
+    
+    @app.route('/api/logs')
+    def api_logs():
+        """API endpoint to get logs"""
+        return jsonify(live_logs)
+    
+    @app.route('/api/errors')
+    def api_errors():
+        """API endpoint to get application errors"""
+        return jsonify(application_errors)
+    
+    @app.route('/api/system')
+    def api_system():
+        """API endpoint to get system information"""
+        return jsonify(system_info)
+    
+    @app.route('/debug')
+    def debug_panel():
+        """Debug panel for managing debug sessions"""
+        return "Debug panel - Manage debug sessions here"
+    
+    @app.route('/api/debug', methods=['POST'])
+    def start_debug():
+        """Start a debug session"""
+        data = request.json
+        app_module = data.get('app_module', 'app.main:app')
+        bind_address = data.get('bind_address', '0.0.0.0:8099')
+        
+        session_id = run_gunicorn_debug(
+            app_module=app_module,
+            bind_address=bind_address
+        )
+        
+        return jsonify({
+            "session_id": session_id,
+            "status": debug_sessions[session_id]["status"]
+        })
+    
+    @app.route('/api/debug/<session_id>')
+    def get_debug_session(session_id):
+        """Get debug session info"""
+        if session_id in debug_sessions:
+            return jsonify(debug_sessions[session_id])
+        else:
+            return jsonify({"error": "Session not found"}), 404
+    
+    @app.route('/api/debug/<session_id>/stop', methods=['POST'])
+    def stop_debug_session(session_id):
+        """Stop a debug session"""
+        if session_id in debug_sessions and debug_sessions[session_id]["pid"]:
+            try:
+                # Try to terminate the process
+                pid = debug_sessions[session_id]["pid"]
+                os.kill(pid, 15)  # SIGTERM
+                debug_sessions[session_id]["status"] = "stopping"
+                return jsonify({"status": "stopping"})
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+        else:
+            return jsonify({"error": "Session not found or already stopped"}), 404
+    
+    return app
+
 # When running directly
 if __name__ == '__main__':
     try:
