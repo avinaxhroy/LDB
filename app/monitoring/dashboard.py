@@ -47,14 +47,24 @@ class DependencyManager:
         except ImportError:
             logger.info(f"{package_name} not found. Installing...")
             try:
-                # Try installing with user flag first to avoid permission issues
-                try:
-                    subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", package_name])
-                    return True
-                except subprocess.CalledProcessError:
-                    # If that fails, try without the --user flag
+                # Check if we're in a virtualenv to avoid using --user flag
+                in_virtualenv = hasattr(sys, 'real_prefix') or (
+                    hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix
+                )
+                
+                if in_virtualenv:
+                    # In virtualenv, don't use --user
                     subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
                     return True
+                else:
+                    # Try installing with user flag first
+                    try:
+                        subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", package_name])
+                        return True
+                    except subprocess.CalledProcessError:
+                        # If that fails, try without the --user flag
+                        subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+                        return True
             except Exception as e:
                 logger.error(f"Error installing {package_name}: {e}")
                 logger.warning(f"Please install {package_name} manually if needed")
@@ -212,6 +222,107 @@ class SystemInformation:
     def get_info(self) -> Dict[str, str]:
         """Get system information dictionary"""
         return self.info.copy()
+
+
+class LogCollector:
+    """Collects and processes logs from various sources"""
+    
+    def __init__(self, config: DashboardConfig):
+        self.config = config
+        self.live_logs = []
+        self.application_errors = []
+    
+    def collect_logs(self):
+        """Collect logs from configured log files"""
+        try:
+            collected_logs = []
+            
+            for log_path in self.config.log_paths:
+                if os.path.exists(log_path):
+                    try:
+                        with open(log_path, 'r', errors='replace') as f:
+                            # Read the last 50 lines
+                            lines = f.readlines()[-50:]
+                            collected_logs.extend([line.strip() for line in lines])
+                    except Exception as e:
+                        logger.error(f"Error reading log file {log_path}: {str(e)}")
+            
+            # Sort logs by timestamp if they have one
+            if collected_logs:
+                # Simple timestamp pattern matching
+                timestamp_pattern = re.compile(r'^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})')
+                
+                def extract_timestamp(log_line):
+                    match = timestamp_pattern.search(log_line)
+                    if match:
+                        try:
+                            ts = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+                            return ts
+                        except ValueError:
+                            try:
+                                ts = datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S")
+                                return ts
+                            except ValueError:
+                                pass
+                    return datetime.min
+                
+                collected_logs.sort(key=extract_timestamp)
+            
+            # Update the live logs (keep only the last MAX_LOGS entries)
+            self.live_logs = collected_logs[-self.config.MAX_LOGS:]
+            
+            # Extract errors for error tracking
+            new_errors = self._extract_errors_from_logs(self.live_logs)
+            
+            # Update application errors list without duplicates
+            for error in new_errors:
+                if error not in self.application_errors:
+                    self.application_errors.append(error)
+            
+            # Keep only the most recent 20 errors
+            self.application_errors = self.application_errors[-20:]
+            
+        except Exception as e:
+            logger.error(f"Error collecting logs: {str(e)}")
+    
+    def _extract_errors_from_logs(self, log_lines, max_errors=10):
+        """Extract error information from log lines with full context"""
+        errors = []
+        current_error = []
+        in_error = False
+        error_pattern = re.compile(r'(ERROR|Exception|Traceback|Error:|CRITICAL)')
+        
+        for line in log_lines:
+            if error_pattern.search(line):
+                if in_error and current_error:
+                    errors.append('\n'.join(current_error))
+                    current_error = []
+                in_error = True
+            
+            if in_error:
+                current_error.append(line)
+                # End of traceback typically has this pattern
+                if line.strip().startswith('File ') and ': ' in line:
+                    continue
+                elif line.strip() and not line.startswith(' '):
+                    in_error = False
+                    errors.append('\n'.join(current_error))
+                    current_error = []
+        
+        # Add the last error if there's one being processed
+        if in_error and current_error:
+            errors.append('\n'.join(current_error))
+        
+        # Return the most recent errors first
+        return errors[-max_errors:]
+    
+    def get_logs(self) -> List[str]:
+        """Get collected logs"""
+        return self.live_logs.copy()
+    
+    def get_errors(self) -> List[str]:
+        """Get application errors"""
+        return self.application_errors.copy()
 
 
 class Dashboard:
