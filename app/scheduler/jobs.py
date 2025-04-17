@@ -270,6 +270,41 @@ def initialize_scheduler():
         CronTrigger(hour='*/1'),  # Hourly
         id='update_trending'
     )
+    
+    # Add immediate execution jobs to populate the database quickly on startup
+    from apscheduler.triggers.date import DateTrigger
+    import datetime
+    
+    # Schedule immediate data collection with 30-second delays between each
+    # This prevents overwhelming the system with simultaneous tasks
+    now = datetime.datetime.now()
+    scheduler.add_job(
+        collect_from_reddit,
+        DateTrigger(run_date=now + datetime.timedelta(seconds=30)),
+        id='initial_reddit_collection'
+    )
+    
+    scheduler.add_job(
+        collect_from_youtube,
+        DateTrigger(run_date=now + datetime.timedelta(seconds=90)),
+        id='initial_youtube_collection'
+    )
+    
+    # Delay Spotify enrichment to run after initial data collection
+    scheduler.add_job(
+        enrich_with_spotify,
+        DateTrigger(run_date=now + datetime.timedelta(seconds=180)),
+        id='initial_spotify_enrichment'
+    )
+    
+    # Delay lyrics fetching to run after enrichment
+    scheduler.add_job(
+        fetch_lyrics,
+        DateTrigger(run_date=now + datetime.timedelta(seconds=240)),
+        id='initial_lyrics_fetching'
+    )
+    
+    logger.info("Scheduler initialized with immediate startup jobs")
 
     # Start the scheduler
     scheduler.start()
