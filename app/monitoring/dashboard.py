@@ -8,10 +8,6 @@ import threading
 import time
 from typing import Dict, Any, List, Optional
 
-# Import exporters
-from app.monitoring.exporters.console import ConsoleExporter
-from app.monitoring.exporters.prometheus import PrometheusExporter
-
 # Set matplotlib configuration directory to a writable location
 os.environ['MPLCONFIGDIR'] = '/tmp/matplotlib'
 # Ensure the directory exists
@@ -28,6 +24,10 @@ if log_dir:
 else:
     print("Warning: LOG_DIR environment variable is not set. Using /tmp for logs.")
     log_dir = '/tmp'
+
+# Import exporters
+from app.monitoring.exporters.console import ConsoleExporter
+from app.monitoring.exporters.prometheus import PrometheusExporter
 
 # Dashboard visualization libraries
 try:
