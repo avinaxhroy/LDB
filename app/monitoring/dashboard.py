@@ -1,632 +1,877 @@
-import os
-import time
-import psutil
+# app/monitoring/dashboard.py
+
 import logging
-import threading
 import datetime
-from flask import Flask, render_template, jsonify, request
-import matplotlib.pyplot as plt
-import pandas as pd
-from io import BytesIO
-import base64
+import os
 import json
-import sqlite3
-import socket
-import requests
+import threading
+import time
+from typing import Dict, Any, List, Optional
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("e:\\LDB\\logs\\dashboard.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger("LDB-Dashboard")
+# Import exporters
+from app.monitoring.exporters.console import ConsoleExporter
+from app.monitoring.exporters.prometheus import PrometheusExporter
 
-class LDBDashboard:
-    def __init__(self, update_interval=5, config_file=None):
+# Dashboard visualization libraries
+try:
+    import dash
+    from dash import dcc, html
+    from dash.dependencies import Input, Output
+    import plotly.express as px
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    DASH_AVAILABLE = True
+except ImportError:
+    DASH_AVAILABLE = False
+    logging.warning("Dash not installed. Web dashboard will not be available. Install with: pip install dash")
+
+# Grafana dashboard generation
+try:
+    from grafanalib.core import (
+        Dashboard, Graph, Row, Target, GridPos, 
+        YAxes, YAxis, SECONDS_FORMAT,
+        single_y_axis, Stat, TimeSeries, RowPanel
+    )
+    from grafanalib._gen import DashboardEncoder
+    GRAFANA_AVAILABLE = True
+except ImportError:
+    GRAFANA_AVAILABLE = False
+    logging.warning("Grafanalib not installed. Grafana dashboard generation will not be available. Install with: pip install grafanalib")
+
+logger = logging.getLogger(__name__)
+
+class MonitoringDashboard:
+    """
+    Unified dashboard for monitoring system components.
+    
+    This class provides:
+    1. A web-based dashboard using Dash (if installed)
+    2. Grafana dashboard definition generation
+    3. Integration with ConsoleExporter and PrometheusExporter
+    
+    It integrates all monitoring components into a single interface.
+    """
+    
+    def __init__(self, monitoring_system=None, host="0.0.0.0", port=8050, 
+                 refresh_interval=10, debug=False,
+                 console_export_interval=60,
+                 prometheus_port=9090,
+                 enable_console_exporter=True,
+                 enable_prometheus_exporter=True):
         """
-        Initialize the LDB monitoring dashboard
+        Initialize the monitoring dashboard.
         
         Args:
-            update_interval (int): Interval in seconds for metrics collection
-            config_file (str): Path to configuration file
+            monitoring_system: The monitoring system instance
+            host: Host to run the dashboard on
+            port: Port to run the dashboard on
+            refresh_interval: Data refresh interval in seconds
+            debug: Enable debug mode
+            console_export_interval: Interval for console exporter in seconds
+            prometheus_port: Port for Prometheus metrics server
+            enable_console_exporter: Whether to enable the console exporter
+            enable_prometheus_exporter: Whether to enable the Prometheus exporter
         """
-        self.update_interval = update_interval
-        self.metrics = {
-            'cpu_usage': [],
-            'memory_usage': [],
-            'disk_usage': [],
-            'network_traffic': [],
-            'active_connections': [],
-            'request_count': 0,
-            'error_count': 0,
-            'response_times': [],
-            'timestamp': [],
-            'db_query_times': [],
-            'db_transaction_count': 0,
-            'custom_events': [],
-            'health_check_status': {},
-            'api_call_count': {},
-            'process_memory': []
-        }
-        self.alerts = []
-        self.is_running = False
-        self.alert_thresholds = {
-            'cpu_usage': 80,  # percentage
-            'memory_usage': 80,  # percentage
-            'disk_usage': 80,  # percentage
-            'error_rate': 5,  # percentage
-            'response_time': 2000  # milliseconds
-        }
+        from app.monitoring.core import monitoring
         
-        # Load configuration if provided
-        self.config = self._load_config(config_file)
+        self.monitoring = monitoring_system or monitoring
+        self.host = host
+        self.port = port
+        self.refresh_interval = refresh_interval
+        self.debug = debug
+        self.thread = None
+        self.running = False
+        self._started = False
+        self.app = None
         
-        # Database connection info (from config or defaults)
-        self.db_config = self.config.get('database', {
-            'enabled': False,
-            'path': 'e:\\LDB\\data\\ldb.db',
-            'check_interval': 30  # seconds
-        })
+        # Initialize exporters
+        self.console_exporter = None
+        self.prometheus_exporter = None
         
-        # Health check endpoints
-        self.health_checks = self.config.get('health_checks', [
-            {'name': 'Main API', 'url': 'http://localhost:8000/health', 'timeout': 5},
-            {'name': 'Database', 'type': 'database', 'timeout': 3}
+        if enable_console_exporter:
+            self.console_exporter = ConsoleExporter(interval=console_export_interval)
+            self.console_exporter.start()
+            logger.info(f"Console exporter initialized with {console_export_interval}s interval")
+        
+        if enable_prometheus_exporter:
+            self.prometheus_exporter = PrometheusExporter(port=prometheus_port)
+            prometheus_started = self.prometheus_exporter.start()
+            if prometheus_started:
+                logger.info(f"Prometheus exporter started on port {prometheus_port}")
+            else:
+                logger.warning("Failed to start Prometheus exporter")
+        
+        # Initialize the dashboard if Dash is available
+        if DASH_AVAILABLE:
+            self._setup_dash_app()
+    
+    def _setup_dash_app(self):
+        """Set up the Dash application for the web dashboard"""
+        app = dash.Dash(__name__, 
+                       title="Application Monitoring Dashboard",
+                       update_title="Updating...",
+                       suppress_callback_exceptions=True)
+        
+        # Define the layout
+        app.layout = html.Div([
+            # Header
+            html.Div([
+                html.H1("Application Monitoring Dashboard", 
+                        style={'textAlign': 'center', 'margin-bottom': '10px'}),
+                html.Div([
+                    html.Span("Last updated: ", style={'fontWeight': 'bold'}),
+                    html.Span(id="last-updated")
+                ], style={'textAlign': 'center', 'margin-bottom': '20px'}),
+                
+                # System status overview
+                html.Div([
+                    html.H3("System Status", style={'margin-bottom': '10px'}),
+                    html.Div(id="system-status-cards", className="status-cards")
+                ], style={'margin-bottom': '20px'}),
+                
+                # Tabs for different sections
+                dcc.Tabs([
+                    # System metrics tab
+                    dcc.Tab(label="System Metrics", children=[
+                        html.Div([
+                            html.H3("CPU & Memory Usage", style={'margin-top': '20px'}),
+                            dcc.Graph(id="cpu-memory-graph"),
+                            
+                            html.H3("Disk Usage", style={'margin-top': '20px'}),
+                            dcc.Graph(id="disk-usage-graph"),
+                            
+                            html.H3("Process Details", style={'margin-top': '20px'}),
+                            dcc.Graph(id="process-details-graph")
+                        ])
+                    ]),
+                    
+                    # Database metrics tab
+                    dcc.Tab(label="Database Metrics", children=[
+                        html.Div([
+                            html.H3("Database Connections", style={'margin-top': '20px'}),
+                            dcc.Graph(id="db-connections-graph"),
+                            
+                            html.H3("Table Record Counts", style={'margin-top': '20px'}),
+                            dcc.Graph(id="table-records-graph"),
+                            
+                            html.Div(id="db-status-info", style={'margin-top': '20px'})
+                        ])
+                    ]),
+                    
+                    # Application metrics tab
+                    dcc.Tab(label="Application Metrics", children=[
+                        html.Div([
+                            html.H3("HTTP Requests", style={'margin-top': '20px'}),
+                            dcc.Graph(id="http-requests-graph"),
+                            
+                            html.H3("Custom Metrics", style={'margin-top': '20px'}),
+                            html.Div(id="custom-metrics-container")
+                        ])
+                    ]),
+                    
+                    # Health checks tab
+                    dcc.Tab(label="Health Checks", children=[
+                        html.Div([
+                            html.H3("Health Status", style={'margin-top': '20px'}),
+                            html.Div(id="health-status-container"),
+                            
+                            html.H3("Recent Health History", style={'margin-top': '20px'}),
+                            dcc.Graph(id="health-history-graph")
+                        ])
+                    ]),
+                    
+                    # Error tracking tab
+                    dcc.Tab(label="Error Tracking", children=[
+                        html.Div([
+                            html.H3("Recent Errors", style={'margin-top': '20px'}),
+                            html.Div(id="recent-errors-container")
+                        ])
+                    ]),
+                    
+                    # Exporters configuration tab
+                    dcc.Tab(label="Exporters", children=[
+                        html.Div([
+                            html.H3("Metrics Exporters", style={'margin-top': '20px'}),
+                            
+                            # Console Exporter Section
+                            html.Div([
+                                html.H4("Console Exporter"),
+                                html.Div(id="console-exporter-status"),
+                                html.Div([
+                                    html.Label("Export Interval (seconds):"),
+                                    dcc.Input(
+                                        id="console-interval-input",
+                                        type="number",
+                                        min=5,
+                                        max=3600,
+                                        value=60,
+                                        style={"margin-left": "10px", "width": "100px"}
+                                    ),
+                                    html.Button(
+                                        "Apply",
+                                        id="console-interval-button",
+                                        style={"margin-left": "10px"}
+                                    )
+                                ], style={"margin-top": "10px", "display": "flex", "align-items": "center"}),
+                                html.Div([
+                                    html.Button(
+                                        "Start Console Exporter",
+                                        id="start-console-button",
+                                        style={"margin-right": "10px"}
+                                    ),
+                                    html.Button(
+                                        "Stop Console Exporter",
+                                        id="stop-console-button"
+                                    )
+                                ], style={"margin-top": "10px"})
+                            ], style={"border": "1px solid #ddd", "padding": "15px", "margin-bottom": "20px"}),
+                            
+                            # Prometheus Exporter Section
+                            html.Div([
+                                html.H4("Prometheus Exporter"),
+                                html.Div(id="prometheus-exporter-status"),
+                                html.Div([
+                                    html.Label("Prometheus Port:"),
+                                    dcc.Input(
+                                        id="prometheus-port-input",
+                                        type="number",
+                                        min=1024,
+                                        max=65535,
+                                        value=9090,
+                                        style={"margin-left": "10px", "width": "100px"}
+                                    ),
+                                    html.Button(
+                                        "Apply",
+                                        id="prometheus-port-button",
+                                        style={"margin-left": "10px"}
+                                    )
+                                ], style={"margin-top": "10px", "display": "flex", "align-items": "center"}),
+                                html.Div([
+                                    html.Button(
+                                        "Start Prometheus Exporter",
+                                        id="start-prometheus-button",
+                                        style={"margin-right": "10px"}
+                                    ),
+                                    html.Button(
+                                        "Stop Prometheus Exporter",
+                                        id="stop-prometheus-button"
+                                    )
+                                ], style={"margin-top": "10px"})
+                            ], style={"border": "1px solid #ddd", "padding": "15px"})
+                        ])
+                    ]),
+                    
+                    # Debug tools tab
+                    dcc.Tab(label="Debug Tools", children=[
+                        html.Div([
+                            html.H3("System State Capture", style={'margin-top': '20px'}),
+                            html.Button("Capture System State", id="capture-state-button", 
+                                       className="action-button"),
+                            html.Div(id="capture-state-result", style={'margin-top': '10px'}),
+                            
+                            html.H3("Thread Information", style={'margin-top': '20px'}),
+                            html.Div(id="thread-info-container")
+                        ])
+                    ])
+                ])
+            ], className="dashboard-container")
         ])
         
-        # Add process monitoring
-        self.process_name = self.config.get('process_name', 'python')
-        self.pid = None
+        # Set up callbacks for data updates
+        self._setup_callbacks(app)
         
-        logger.info("LDB Dashboard initialized")
+        self.app = app
     
-    def _load_config(self, config_file):
-        """Load configuration from JSON file"""
-        default_config = {
-            'alert_thresholds': {
-                'cpu_usage': 80,
-                'memory_usage': 80,
-                'disk_usage': 80,
-                'error_rate': 5,
-                'response_time': 2000
-            },
-            'retention': {
-                'metrics_history': 100,
-                'alerts_history': 20
-            },
-            'database': {
-                'enabled': False,
-                'path': 'e:\\LDB\\data\\ldb.db',
-                'check_interval': 30
-            },
-            'process_name': 'python',
-            'log_dir': 'e:\\LDB\\logs'
-        }
+    def _setup_callbacks(self, app):
+        """Set up the Dash callbacks for updating dashboard data"""
         
-        if config_file and os.path.exists(config_file):
-            try:
-                with open(config_file, 'r') as f:
-                    loaded_config = json.load(f)
-                    # Merge with defaults
-                    for key, value in loaded_config.items():
-                        if isinstance(value, dict) and key in default_config:
-                            default_config[key].update(value)
-                        else:
-                            default_config[key] = value
-                    logger.info(f"Configuration loaded from {config_file}")
-            except Exception as e:
-                logger.error(f"Error loading configuration: {str(e)}")
-        
-        # Update alert thresholds from config
-        self.alert_thresholds = default_config['alert_thresholds']
-        
-        return default_config
-    
-    def start_monitoring(self):
-        """Start the metrics collection thread"""
-        if not self.is_running:
-            self.is_running = True
-            self.monitor_thread = threading.Thread(target=self._collect_metrics)
-            self.monitor_thread.daemon = True
-            self.monitor_thread.start()
-            logger.info("Monitoring started")
-            return True
-        logger.warning("Monitoring already running")
-        return False
-        
-    def stop_monitoring(self):
-        """Stop the metrics collection thread"""
-        if self.is_running:
-            self.is_running = False
-            logger.info("Monitoring stopped")
-            return True
-        logger.warning("Monitoring already stopped")
-        return False
-    
-    def _collect_metrics(self):
-        """Collect system and application metrics at regular intervals"""
-        last_db_check = 0
-        
-        while self.is_running:
-            try:
-                timestamp = datetime.datetime.now()
-                # System metrics
-                cpu = psutil.cpu_percent(interval=1)
-                memory = psutil.virtual_memory().percent
-                disk = psutil.disk_usage('/').percent
-                network = psutil.net_io_counters()
-                net_sent_recv = network.bytes_sent + network.bytes_recv
-                
-                # Record metrics
-                self.metrics['timestamp'].append(timestamp)
-                self.metrics['cpu_usage'].append(cpu)
-                self.metrics['memory_usage'].append(memory)
-                self.metrics['disk_usage'].append(disk)
-                self.metrics['network_traffic'].append(net_sent_recv)
-                
-                # Monitor specific LDB process if possible
-                self._monitor_ldb_process()
-                
-                # Check database metrics periodically
-                if self.db_config['enabled'] and (time.time() - last_db_check > self.db_config['check_interval']):
-                    self._collect_database_metrics()
-                    last_db_check = time.time()
-                
-                # Run health checks
-                self._run_health_checks()
-                
-                # Check for alerts
-                self._check_alerts(cpu, memory, disk)
-                
-                # Keep only the configured amount of history
-                max_history = self.config['retention']['metrics_history']
-                for key in ['timestamp', 'cpu_usage', 'memory_usage', 'disk_usage', 
-                           'network_traffic', 'response_times', 'active_connections',
-                           'db_query_times', 'custom_events', 'process_memory']:
-                    if len(self.metrics[key]) > max_history:
-                        self.metrics[key] = self.metrics[key][-max_history:]
-                
-                # Sleep until next collection
-                time.sleep(self.update_interval)
-            except Exception as e:
-                logger.error(f"Error collecting metrics: {str(e)}")
-                time.sleep(self.update_interval)
-    
-    def _monitor_ldb_process(self):
-        """Monitor the LDB process specifically"""
-        try:
-            # Find the process if we don't have it yet
-            if not self.pid:
-                for proc in psutil.process_iter(['pid', 'name']):
-                    if self.process_name in proc.info['name'].lower():
-                        self.pid = proc.info['pid']
-                        logger.info(f"Found LDB process with PID {self.pid}")
-                        break
-            
-            # Get process stats if we have a PID
-            if self.pid:
-                try:
-                    process = psutil.Process(self.pid)
-                    mem_info = process.memory_info()
-                    self.metrics['process_memory'].append(mem_info.rss / (1024 * 1024))  # MB
-                except psutil.NoSuchProcess:
-                    logger.warning(f"LDB process with PID {self.pid} no longer exists")
-                    self.pid = None
-                    self.metrics['process_memory'].append(0)
-            else:
-                self.metrics['process_memory'].append(0)
-        except Exception as e:
-            logger.error(f"Error monitoring LDB process: {str(e)}")
-            self.metrics['process_memory'].append(0)
-    
-    def _collect_database_metrics(self):
-        """Collect metrics from the LDB database"""
-        try:
-            if os.path.exists(self.db_config['path']):
-                conn = sqlite3.connect(self.db_config['path'])
-                cursor = conn.cursor()
-                
-                # Get database size
-                cursor.execute("PRAGMA page_count")
-                page_count = cursor.fetchone()[0]
-                cursor.execute("PRAGMA page_size")
-                page_size = cursor.fetchone()[0]
-                db_size = (page_count * page_size) / (1024 * 1024)  # Size in MB
-                
-                # Add to custom events
-                self.metrics['custom_events'].append({
-                    'timestamp': datetime.datetime.now(),
-                    'type': 'database_size',
-                    'value': db_size,
-                    'unit': 'MB'
-                })
-                
-                # Check if specific tables exist and get their row counts
-                tables_to_check = ['users', 'transactions', 'logs', 'data']
-                for table in tables_to_check:
-                    try:
-                        cursor.execute(f"SELECT COUNT(*) FROM {table}")
-                        count = cursor.fetchone()[0]
-                        self.metrics['custom_events'].append({
-                            'timestamp': datetime.datetime.now(),
-                            'type': f'table_size_{table}',
-                            'value': count,
-                            'unit': 'rows'
-                        })
-                    except sqlite3.OperationalError:
-                        # Table doesn't exist, skip
-                        pass
-                
-                conn.close()
-                
-                # Update health check status
-                self.metrics['health_check_status']['Database'] = {
-                    'status': 'OK',
-                    'details': f'Size: {db_size:.2f} MB'
-                }
-            else:
-                logger.warning(f"Database file not found: {self.db_config['path']}")
-                self.metrics['health_check_status']['Database'] = {
-                    'status': 'FAIL',
-                    'details': 'Database file not found'
-                }
-        except Exception as e:
-            logger.error(f"Error collecting database metrics: {str(e)}")
-            self.metrics['health_check_status']['Database'] = {
-                'status': 'ERROR',
-                'details': str(e)
-            }
-    
-    def _run_health_checks(self):
-        """Run health checks on all configured endpoints"""
-        for check in self.health_checks:
-            try:
-                if check.get('type') == 'database':
-                    # Database health check is handled separately
-                    continue
-                    
-                if 'url' in check:
-                    response = requests.get(check['url'], timeout=check.get('timeout', 5))
-                    
-                    if response.status_code == 200:
-                        status = "OK"
-                        details = f"Response time: {response.elapsed.total_seconds()*1000:.2f}ms"
-                    else:
-                        status = "WARN"
-                        details = f"Status code: {response.status_code}"
-                    
-                    self.metrics['health_check_status'][check['name']] = {
-                        'status': status,
-                        'details': details
-                    }
-            except requests.RequestException as e:
-                self.metrics['health_check_status'][check['name']] = {
-                    'status': 'FAIL',
-                    'details': str(e)
-                }
-    
-    def record_request(self, endpoint, response_time_ms, error=False):
-        """
-        Record a request to the system
-        
-        Args:
-            endpoint (str): The API endpoint called
-            response_time_ms (float): Response time in milliseconds
-            error (bool): Whether request resulted in error
-        """
-        self.metrics['request_count'] += 1
-        self.metrics['response_times'].append(response_time_ms)
-        
-        if error:
-            self.metrics['error_count'] += 1
-            
-        # Check if response time exceeds threshold
-        if response_time_ms > self.alert_thresholds['response_time']:
-            alert = f"SLOW RESPONSE ALERT: {endpoint} took {response_time_ms}ms at {datetime.datetime.now()}"
-            self.alerts.append(alert)
-            logger.warning(alert)
-    
-    def record_connection(self, count):
-        """Record the number of active connections"""
-        self.metrics['active_connections'].append(count)
-    
-    def record_db_query(self, query_type, execution_time_ms):
-        """
-        Record database query execution time
-        
-        Args:
-            query_type (str): Type of query (SELECT, INSERT, etc.)
-            execution_time_ms (float): Execution time in milliseconds
-        """
-        self.metrics['db_query_times'].append({
-            'timestamp': datetime.datetime.now(),
-            'type': query_type,
-            'execution_time': execution_time_ms
-        })
-        self.metrics['db_transaction_count'] += 1
-        
-        # Check if query time is concerning
-        if execution_time_ms > 1000:  # Over 1 second
-            alert = f"SLOW DB QUERY ALERT: {query_type} took {execution_time_ms}ms at {datetime.datetime.now()}"
-            self.alerts.append(alert)
-            logger.warning(alert)
-    
-    def record_custom_event(self, event_type, value, unit=None):
-        """
-        Record a custom application event
-        
-        Args:
-            event_type (str): Type of event
-            value: Value associated with the event
-            unit (str): Unit of measurement
-        """
-        self.metrics['custom_events'].append({
-            'timestamp': datetime.datetime.now(),
-            'type': event_type,
-            'value': value,
-            'unit': unit
-        })
-    
-    def record_api_call(self, endpoint):
-        """
-        Record an API call to track most used endpoints
-        
-        Args:
-            endpoint (str): The API endpoint called
-        """
-        if endpoint not in self.metrics['api_call_count']:
-            self.metrics['api_call_count'][endpoint] = 0
-        self.metrics['api_call_count'][endpoint] += 1
-    
-    def get_summary(self):
-        """Get a summary of the current metrics"""
-        if not self.metrics['cpu_usage']:
-            return {"status": "No data available yet"}
-            
-        summary = {
-            "current_cpu": self.metrics['cpu_usage'][-1],
-            "current_memory": self.metrics['memory_usage'][-1],
-            "current_disk": self.metrics['disk_usage'][-1],
-            "request_count": self.metrics['request_count'],
-            "error_count": self.metrics['error_count'],
-            "error_rate": (self.metrics['error_count'] / max(1, self.metrics['request_count']) * 100),
-            "avg_response_time": sum(self.metrics['response_times']) / max(1, len(self.metrics['response_times'])),
-            "recent_alerts": self.alerts[-5:] if self.alerts else [],
-            "db_transaction_count": self.metrics['db_transaction_count'],
-            "health_checks": self.metrics['health_check_status'],
-            "top_api_endpoints": self._get_top_endpoints(5),
-            "process_memory_mb": self.metrics['process_memory'][-1] if self.metrics['process_memory'] else 0
-        }
-        
-        return summary
-    
-    def _get_top_endpoints(self, limit=5):
-        """Get the most frequently called API endpoints"""
-        sorted_endpoints = sorted(
-            self.metrics['api_call_count'].items(),
-            key=lambda x: x[1],
-            reverse=True
+        # Update timestamp
+        @app.callback(
+            Output("last-updated", "children"),
+            Input("interval-component", "n_intervals")
         )
-        return dict(sorted_endpoints[:limit])
-    
-    def generate_cpu_chart(self):
-        """Generate CPU usage chart as base64 string"""
-        if len(self.metrics['timestamp']) < 2:
-            return None
+        def update_time(n):
+            return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # System status cards
+        @app.callback(
+            Output("system-status-cards", "children"),
+            Input("interval-component", "n_intervals")
+        )
+        def update_system_status(n):
+            try:
+                metrics = self.monitoring.get_metrics()
+                health = self.monitoring.get_health()
+                
+                system_metrics = metrics.get("system_metrics", {})
+                
+                cards = []
+                
+                # CPU card
+                cpu_percent = system_metrics.get("cpu_percent", 0)
+                cpu_color = "green" if cpu_percent < 70 else "orange" if cpu_percent < 90 else "red"
+                cards.append(html.Div([
+                    html.H4("CPU"),
+                    html.P(f"{cpu_percent:.1f}%", style={"color": cpu_color})
+                ], className="status-card"))
+                
+                # Memory card
+                memory_percent = system_metrics.get("memory_percent", 0)
+                memory_color = "green" if memory_percent < 70 else "orange" if memory_percent < 90 else "red"
+                cards.append(html.Div([
+                    html.H4("Memory"),
+                    html.P(f"{memory_percent:.1f}%", style={"color": memory_color})
+                ], className="status-card"))
+                
+                # Disk card
+                disk_percent = system_metrics.get("disk_percent", 0)
+                disk_color = "green" if disk_percent < 70 else "orange" if disk_percent < 90 else "red"
+                cards.append(html.Div([
+                    html.H4("Disk"),
+                    html.P(f"{disk_percent:.1f}%", style={"color": disk_color})
+                ], className="status-card"))
+                
+                # Health status card
+                health_status = health.get("status", "unknown")
+                health_color = "green" if health_status == "healthy" else "red"
+                cards.append(html.Div([
+                    html.H4("Health"),
+                    html.P(health_status.capitalize(), style={"color": health_color})
+                ], className="status-card"))
+                
+                return cards
+            except Exception as e:
+                logger.error(f"Error updating system status: {str(e)}")
+                return html.Div(f"Error loading system status: {str(e)}")
+        
+        # Console Exporter Status
+        @app.callback(
+            Output("console-exporter-status", "children"),
+            Input("interval-component", "n_intervals")
+        )
+        def update_console_exporter_status(n):
+            if not self.console_exporter:
+                return html.P("Console exporter not initialized", style={"color": "gray"})
             
-        plt.figure(figsize=(10, 6))
-        plt.plot(self.metrics['timestamp'], self.metrics['cpu_usage'])
-        plt.title('CPU Usage Over Time')
-        plt.ylabel('CPU Usage (%)')
-        plt.xlabel('Time')
-        plt.grid(True)
-        plt.tight_layout()
+            status = self.console_exporter.get_status()
+            if status["active"]:
+                return html.P(f"Active - Exporting metrics every {status['interval']} seconds", style={"color": "green"})
+            else:
+                return html.P("Inactive", style={"color": "red"})
         
-        # Convert plot to base64 string
-        buffer = BytesIO()
-        plt.savefig(buffer, format='png')
-        buffer.seek(0)
-        image_png = buffer.getvalue()
-        buffer.close()
-        plt.close()
-        
-        return base64.b64encode(image_png).decode('utf-8')
-    
-    def generate_memory_chart(self):
-        """Generate memory usage chart as base64 string"""
-        if len(self.metrics['timestamp']) < 2:
-            return None
+        # Prometheus Exporter Status
+        @app.callback(
+            Output("prometheus-exporter-status", "children"),
+            Input("interval-component", "n_intervals")
+        )
+        def update_prometheus_exporter_status(n):
+            if not self.prometheus_exporter:
+                return html.P("Prometheus exporter not initialized", style={"color": "gray"})
             
-        plt.figure(figsize=(10, 6))
-        plt.plot(self.metrics['timestamp'], self.metrics['memory_usage'])
-        plt.title('Memory Usage Over Time')
-        plt.ylabel('Memory Usage (%)')
-        plt.xlabel('Time')
-        plt.grid(True)
-        plt.tight_layout()
+            status = self.prometheus_exporter.get_status()
+            if status["active"]:
+                return html.P(f"Active - Serving metrics on port {status['port']}", style={"color": "green"})
+            else:
+                if status["available"]:
+                    return html.P("Inactive - Prometheus client available", style={"color": "orange"})
+                else:
+                    return html.P("Inactive - Prometheus client not installed", style={"color": "red"})
         
-        # Convert plot to base64 string
-        buffer = BytesIO()
-        plt.savefig(buffer, format='png')
-        buffer.seek(0)
-        image_png = buffer.getvalue()
-        buffer.close()
-        plt.close()
-        
-        return base64.b64encode(image_png).decode('utf-8')
-    
-    def generate_process_memory_chart(self):
-        """Generate process memory usage chart as base64 string"""
-        if len(self.metrics['timestamp']) < 2 or len(self.metrics['process_memory']) < 2:
-            return None
+        # Start Console Exporter
+        @app.callback(
+            Output("start-console-button", "disabled"),
+            Input("start-console-button", "n_clicks"),
+            prevent_initial_call=True
+        )
+        def start_console_exporter(n_clicks):
+            if n_clicks is None:
+                return False
             
-        plt.figure(figsize=(10, 6))
-        plt.plot(self.metrics['timestamp'][-len(self.metrics['process_memory']):], 
-                 self.metrics['process_memory'])
-        plt.title('LDB Process Memory Usage Over Time')
-        plt.ylabel('Memory Usage (MB)')
-        plt.xlabel('Time')
-        plt.grid(True)
-        plt.tight_layout()
-        
-        # Convert plot to base64 string
-        buffer = BytesIO()
-        plt.savefig(buffer, format='png')
-        buffer.seek(0)
-        image_png = buffer.getvalue()
-        buffer.close()
-        plt.close()
-        
-        return base64.b64encode(image_png).decode('utf-8')
-    
-    def generate_db_performance_chart(self):
-        """Generate database query performance chart as base64 string"""
-        if not self.metrics['db_query_times']:
-            return None
-        
-        # Extract data for plotting
-        timestamps = [item['timestamp'] for item in self.metrics['db_query_times']]
-        exec_times = [item['execution_time'] for item in self.metrics['db_query_times']]
-        query_types = [item['type'] for item in self.metrics['db_query_times']]
-        
-        plt.figure(figsize=(10, 6))
-        
-        # Different colors for different query types
-        colors = {'SELECT': 'blue', 'INSERT': 'green', 'UPDATE': 'orange', 'DELETE': 'red'}
-        
-        for qtype in set(query_types):
-            indices = [i for i, t in enumerate(query_types) if t == qtype]
-            plt.scatter([timestamps[i] for i in indices], 
-                       [exec_times[i] for i in indices],
-                       label=qtype,
-                       color=colors.get(qtype, 'gray'),
-                       alpha=0.7)
-        
-        plt.title('Database Query Performance')
-        plt.ylabel('Execution Time (ms)')
-        plt.xlabel('Time')
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        
-        # Convert plot to base64 string
-        buffer = BytesIO()
-        plt.savefig(buffer, format='png')
-        buffer.seek(0)
-        image_png = buffer.getvalue()
-        buffer.close()
-        plt.close()
-        
-        return base64.b64encode(image_png).decode('utf-8')
-    
-    def export_metrics_to_csv(self, filepath):
-        """Export collected metrics to CSV file"""
-        try:
-            df = pd.DataFrame({
-                'timestamp': self.metrics['timestamp'],
-                'cpu_usage': self.metrics['cpu_usage'],
-                'memory_usage': self.metrics['memory_usage'],
-                'disk_usage': self.metrics['disk_usage'],
-                'network_traffic': self.metrics['network_traffic']
-            })
-            df.to_csv(filepath, index=False)
-            logger.info(f"Metrics exported to {filepath}")
-            return True
-        except Exception as e:
-            logger.error(f"Error exporting metrics: {str(e)}")
+            if not self.console_exporter:
+                self.console_exporter = ConsoleExporter()
+            
+            if not self.console_exporter._started:
+                self.console_exporter.start()
+                logger.info("Console exporter started via dashboard")
+            
             return False
-
-# Create a simple web server for the dashboard
-app = Flask(__name__)
-dashboard = LDBDashboard()
-
-@app.route('/')
-def index():
-    """Render the dashboard homepage"""
-    return render_template('dashboard.html', title='LDB Monitoring Dashboard')
-
-@app.route('/api/metrics')
-def api_metrics():
-    """API endpoint to get current metrics"""
-    return jsonify(dashboard.get_summary())
-
-@app.route('/api/charts/cpu')
-def api_cpu_chart():
-    """API endpoint to get CPU chart"""
-    chart = dashboard.generate_cpu_chart()
-    return jsonify({'chart': chart})
-
-@app.route('/api/charts/memory')
-def api_memory_chart():
-    """API endpoint to get memory chart"""
-    chart = dashboard.generate_memory_chart()
-    return jsonify({'chart': chart})
-
-@app.route('/api/charts/process-memory')
-def api_process_memory_chart():
-    """API endpoint to get process memory chart"""
-    chart = dashboard.generate_process_memory_chart()
-    return jsonify({'chart': chart})
-
-@app.route('/api/charts/db-performance')
-def api_db_performance_chart():
-    """API endpoint to get database performance chart"""
-    chart = dashboard.generate_db_performance_chart()
-    return jsonify({'chart': chart})
-
-@app.route('/api/record-event', methods=['POST'])
-def api_record_event():
-    """API endpoint to record custom events from other parts of the application"""
-    data = request.json
-    if not data or 'type' not in data or 'value' not in data:
-        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+        
+        # Stop Console Exporter
+        @app.callback(
+            Output("stop-console-button", "disabled"),
+            Input("stop-console-button", "n_clicks"),
+            prevent_initial_call=True
+        )
+        def stop_console_exporter(n_clicks):
+            if n_clicks is None:
+                return False
+            
+            if self.console_exporter and self.console_exporter._started:
+                self.console_exporter.shutdown()
+                logger.info("Console exporter stopped via dashboard")
+            
+            return False
+        
+        # Update Console Interval
+        @app.callback(
+            Output("console-interval-button", "disabled"),
+            Input("console-interval-button", "n_clicks"),
+            Input("console-interval-input", "value"),
+            prevent_initial_call=True
+        )
+        def update_console_interval(n_clicks, interval):
+            if n_clicks is None:
+                return False
+            
+            if self.console_exporter:
+                # Need to restart with new interval
+                was_running = self.console_exporter._started
+                if was_running:
+                    self.console_exporter.shutdown()
+                
+                self.console_exporter = ConsoleExporter(interval=interval)
+                
+                if was_running:
+                    self.console_exporter.start()
+                
+                logger.info(f"Console exporter interval updated to {interval}s")
+            
+            return False
+        
+        # Start Prometheus Exporter
+        @app.callback(
+            Output("start-prometheus-button", "disabled"),
+            Input("start-prometheus-button", "n_clicks"),
+            prevent_initial_call=True
+        )
+        def start_prometheus_exporter(n_clicks):
+            if n_clicks is None:
+                return False
+            
+            if not self.prometheus_exporter:
+                self.prometheus_exporter = PrometheusExporter()
+            
+            if not self.prometheus_exporter._started:
+                self.prometheus_exporter.start()
+                logger.info("Prometheus exporter started via dashboard")
+            
+            return False
+        
+        # Stop Prometheus Exporter
+        @app.callback(
+            Output("stop-prometheus-button", "disabled"),
+            Input("stop-prometheus-button", "n_clicks"),
+            prevent_initial_call=True
+        )
+        def stop_prometheus_exporter(n_clicks):
+            if n_clicks is None:
+                return False
+            
+            if self.prometheus_exporter and self.prometheus_exporter._started:
+                self.prometheus_exporter.shutdown()
+                logger.info("Prometheus exporter stopped via dashboard")
+            
+            return False
+        
+        # Update Prometheus Port
+        @app.callback(
+            Output("prometheus-port-button", "disabled"),
+            Input("prometheus-port-button", "n_clicks"),
+            Input("prometheus-port-input", "value"),
+            prevent_initial_call=True
+        )
+        def update_prometheus_port(n_clicks, port):
+            if n_clicks is None:
+                return False
+            
+            if self.prometheus_exporter:
+                # Need to restart with new port
+                was_running = self.prometheus_exporter._started
+                if was_running:
+                    self.prometheus_exporter.shutdown()
+                
+                self.prometheus_exporter = PrometheusExporter(port=port)
+                
+                if was_running:
+                    self.prometheus_exporter.start()
+                
+                logger.info(f"Prometheus exporter port updated to {port}")
+            
+            return False
+        
+        # CPU and memory graph
+        @app.callback(
+            Output("cpu-memory-graph", "figure"),
+            Input("interval-component", "n_intervals")
+        )
+        def update_cpu_memory_graph(n):
+            try:
+                metrics = self.monitoring.get_metrics()
+                system_metrics = metrics.get("system_metrics", {})
+                
+                if "system_metrics" not in metrics:
+                    return go.Figure().update_layout(title="No system metrics available")
+                
+                # Create subplot with two y-axes
+                fig = make_subplots(specs=[[{"secondary_y": True}]])
+                
+                # Add CPU trace
+                fig.add_trace(
+                    go.Scatter(
+                        x=[datetime.datetime.now()],
+                        y=[system_metrics.get("cpu_percent", 0)],
+                        name="CPU Usage",
+                        line=dict(color="blue", width=2)
+                    ),
+                    secondary_y=False
+                )
+                
+                # Add Memory trace
+                fig.add_trace(
+                    go.Scatter(
+                        x=[datetime.datetime.now()],
+                        y=[system_metrics.get("memory_percent", 0)],
+                        name="Memory Usage",
+                        line=dict(color="red", width=2)
+                    ),
+                    secondary_y=True
+                )
+                
+                # Set titles
+                fig.update_layout(
+                    title_text="CPU and Memory Usage",
+                    xaxis_title="Time",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+                
+                # Set y-axes titles
+                fig.update_yaxes(title_text="CPU Usage (%)", secondary_y=False, range=[0, 100])
+                fig.update_yaxes(title_text="Memory Usage (%)", secondary_y=True, range=[0, 100])
+                
+                return fig
+            except Exception as e:
+                logger.error(f"Error updating CPU/memory graph: {str(e)}")
+                return go.Figure().update_layout(title=f"Error: {str(e)}")
+        
+        # Add more callbacks for other graphs and components...
+        # This would include disk usage, process details, database metrics, etc.
+        
+        # Debug tools - Capture system state
+        @app.callback(
+            Output("capture-state-result", "children"),
+            Input("capture-state-button", "n_clicks"),
+            prevent_initial_call=True
+        )
+        def capture_system_state(n_clicks):
+            if n_clicks is None:
+                return ""
+            
+            try:
+                # Import the debug utility
+                from app.monitoring.debug import DebugUtility
+                
+                # Capture the system state
+                filename = DebugUtility.dump_state_to_file()
+                
+                return html.Div([
+                    html.P(f"System state captured successfully!", style={"color": "green"}),
+                    html.P(f"Saved to: {filename}")
+                ])
+            except Exception as e:
+                logger.error(f"Error capturing system state: {str(e)}")
+                return html.P(f"Error capturing system state: {str(e)}", style={"color": "red"})
+        
+        # Add interval component for automatic updates
+        app.layout.children.append(
+            dcc.Interval(
+                id='interval-component',
+                interval=self.refresh_interval * 1000,  # in milliseconds
+                n_intervals=0
+            )
+        )
     
-    dashboard.record_custom_event(
-        data['type'],
-        data['value'],
-        data.get('unit')
-    )
-    return jsonify({'status': 'success'})
-
-@app.route('/api/record-db-query', methods=['POST'])
-def api_record_db_query():
-    """API endpoint to record database query metrics"""
-    data = request.json
-    if not data or 'query_type' not in data or 'execution_time' not in data:
-        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    def start_web_dashboard(self):
+        """Start the web dashboard in a separate thread"""
+        if not DASH_AVAILABLE:
+            logger.error("Cannot start web dashboard: Dash not installed")
+            return False
+        
+        if self.thread is not None and self.thread.is_alive():
+            logger.info("Web dashboard already running")
+            return True
+        
+        def run_dashboard():
+            try:
+                logger.info(f"Starting web dashboard on http://{self.host}:{self.port}")
+                self.app.run_server(host=self.host, port=self.port, debug=self.debug)
+            except Exception as e:
+                logger.error(f"Error running web dashboard: {str(e)}")
+        
+        self.running = True
+        self.thread = threading.Thread(target=run_dashboard, daemon=True)
+        self.thread.start()
+        self._started = True
+        
+        logger.info(f"Web dashboard started at http://{self.host}:{self.port}")
+        return True
     
-    dashboard.record_db_query(
-        data['query_type'],
-        data['execution_time']
+    def shutdown(self):
+        """Shutdown the web dashboard and exporters"""
+        self.running = False
+        
+        # Shutdown exporters
+        if self.console_exporter:
+            self.console_exporter.shutdown()
+            logger.info("Console exporter shutdown completed")
+        
+        if self.prometheus_exporter:
+            self.prometheus_exporter.shutdown()
+            logger.info("Prometheus exporter shutdown requested")
+        
+        if self.thread and self.thread.is_alive():
+            # Note: There's no clean way to stop a Dash server from another thread
+            # This will only mark it for shutdown, but the thread may continue running
+            logger.info("Web dashboard marked for shutdown")
+        
+        self._started = False
+    
+    def generate_grafana_dashboard(self, filename=None):
+        """
+        Generate a Grafana dashboard definition file
+        
+        Args:
+            filename: Optional filename to save the dashboard to
+                     If None, uses "app_dashboard_{timestamp}.json"
+        
+        Returns:
+            The path to the saved dashboard file
+        """
+        if not GRAFANA_AVAILABLE:
+            logger.error("Cannot generate Grafana dashboard: grafanalib not installed")
+            return None
+        
+        try:
+            dashboard = self._create_grafana_dashboard()
+            
+            if filename is None:
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"app_dashboard_{timestamp}.json"
+            
+            # Convert dashboard to JSON
+            json_data = json.dumps(
+                dashboard.to_json_data(), 
+                sort_keys=True, 
+                indent=2, 
+                cls=DashboardEncoder
+            )
+            
+            # Save to file
+            with open(filename, "w") as f:
+                f.write(json_data)
+            
+            logger.info(f"Grafana dashboard saved to {filename}")
+            return filename
+        
+        except Exception as e:
+            logger.error(f"Error generating Grafana dashboard: {str(e)}")
+            return None
+    
+    def _create_grafana_dashboard(self):
+        """Create a Grafana dashboard definition"""
+        return Dashboard(
+            title="Application Monitoring Dashboard",
+            description="Comprehensive monitoring for application performance and health",
+            refresh="10s",
+            tags=["monitoring", "application", "performance"],
+            time={"from": "now-1h", "to": "now"},
+            timezone="browser",
+            rows=[
+                # System metrics row
+                Row(panels=[
+                    Graph(
+                        title="CPU Usage",
+                        dataSource="Prometheus",
+                        targets=[
+                            Target(expr='system_cpu_percent', legendFormat="CPU Usage"),
+                        ],
+                        gridPos=GridPos(h=8, w=12, x=0, y=0),
+                        yAxes=single_y_axis(format=SECONDS_FORMAT, max=100),
+                    ),
+                    Graph(
+                        title="Memory Usage",
+                        dataSource="Prometheus",
+                        targets=[
+                            Target(expr='system_memory_percent', legendFormat="Memory Usage"),
+                        ],
+                        gridPos=GridPos(h=8, w=12, x=12, y=0),
+                        yAxes=single_y_axis(format=SECONDS_FORMAT, max=100),
+                    ),
+                ]),
+                
+                # Disk usage row
+                Row(panels=[
+                    Graph(
+                        title="Disk Usage",
+                        dataSource="Prometheus",
+                        targets=[
+                            Target(expr='system_disk_percent', legendFormat="Disk Usage"),
+                        ],
+                        gridPos=GridPos(h=8, w=12, x=0, y=8),
+                        yAxes=single_y_axis(format=SECONDS_FORMAT, max=100),
+                    ),
+                    Graph(
+                        title="Process Memory",
+                        dataSource="Prometheus",
+                        targets=[
+                            Target(expr='system_process_memory_mb', legendFormat="Process Memory (MB)"),
+                        ],
+                        gridPos=GridPos(h=8, w=12, x=12, y=8),
+                    ),
+                ]),
+                
+                # Database metrics row
+                Row(panels=[
+                    Graph(
+                        title="Database Connections",
+                        dataSource="Prometheus",
+                        targets=[
+                            Target(expr='db_connection_count', legendFormat="DB Connections"),
+                        ],
+                        gridPos=GridPos(h=8, w=12, x=0, y=16),
+                    ),
+                    Graph(
+                        title="HTTP Request Rate",
+                        dataSource="Prometheus",
+                        targets=[
+                            Target(expr='rate(http_requests_total[1m])', legendFormat="Requests"),
+                        ],
+                        gridPos=GridPos(h=8, w=12, x=12, y=16),
+                    ),
+                ]),
+                
+                # Health status row
+                Row(panels=[
+                    Stat(
+                        title="System Health",
+                        dataSource="Prometheus",
+                        targets=[
+                            Target(expr='health_status', legendFormat="Health"),
+                        ],
+                        gridPos=GridPos(h=8, w=8, x=0, y=24),
+                        colorMode="value",
+                        graphMode="none",
+                        thresholds=[
+                            {"value": 0, "color": "red"},
+                            {"value": 1, "color": "green"}
+                        ],
+                    ),
+                    TimeSeries(
+                        title="Health Check History",
+                        dataSource="Prometheus",
+                        targets=[
+                            Target(expr='health_check_status', legendFormat="{{check}}"),
+                        ],
+                        gridPos=GridPos(h=8, w=16, x=8, y=24),
+                    ),
+                ]),
+            ],
+        )
+
+def setup_dashboard(monitoring_system=None, host="0.0.0.0", port=8050, 
+                   refresh_interval=10, debug=False, start_web=True,
+                   console_export_interval=60, prometheus_port=9090,
+                   enable_console_exporter=True, enable_prometheus_exporter=True):
+    """
+    Set up and optionally start the monitoring dashboard
+    
+    Args:
+        monitoring_system: The monitoring system instance
+        host: Host to run the dashboard on
+        port: Port to run the dashboard on
+        refresh_interval: Data refresh interval in seconds
+        debug: Enable debug mode
+        start_web: Whether to start the web dashboard
+        console_export_interval: Interval for console exporter in seconds
+        prometheus_port: Port for Prometheus metrics server
+        enable_console_exporter: Whether to enable the console exporter
+        enable_prometheus_exporter: Whether to enable the Prometheus exporter
+    
+    Returns:
+        The MonitoringDashboard instance
+    """
+    dashboard = MonitoringDashboard(
+        monitoring_system=monitoring_system,
+        host=host,
+        port=port,
+        refresh_interval=refresh_interval,
+        debug=debug,
+        console_export_interval=console_export_interval,
+        prometheus_port=prometheus_port,
+        enable_console_exporter=enable_console_exporter,
+        enable_prometheus_exporter=enable_prometheus_exporter
     )
-    return jsonify({'status': 'success'})
+    
+    if start_web and DASH_AVAILABLE:
+        dashboard.start_web_dashboard()
+    
+    return dashboard
 
-@app.route('/health')
-def health_check():
-    """Health check endpoint for the dashboard itself"""
-    return jsonify({
-        'status': 'OK',
-        'timestamp': datetime.datetime.now().isoformat(),
-        'version': '1.0'
-    })
-
-def run_dashboard_server(host='0.0.0.0', port=5000, debug=False):
-    """Run the dashboard web server"""
-    dashboard.start_monitoring()
-    app.run(host=host, port=port, debug=debug)
+def generate_grafana_dashboard(filename=None, monitoring_system=None):
+    """
+    Generate a Grafana dashboard definition file
+    
+    Args:
+        filename: Optional filename to save the dashboard to
+        monitoring_system: The monitoring system instance
+    
+    Returns:
+        The path to the saved dashboard file
+    """
+    dashboard = MonitoringDashboard(monitoring_system=monitoring_system)
+    return dashboard.generate_grafana_dashboard(filename)
 
 if __name__ == "__main__":
-    # Create log directory if it doesn't exist
-    log_dir = os.path.dirname("e:\\LDB\\logs\\dashboard.log")
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     
-    # Start the dashboard monitoring with configuration
-    config_path = "e:\\LDB\\config\\dashboard_config.json"
-    dashboard = LDBDashboard(update_interval=5, config_file=config_path)
-    dashboard.start_monitoring()
-    app.run(host='0.0.0.0', port=8001, debug=True)
+    # Import the monitoring system
+    try:
+        from app.monitoring.core import monitoring
+        
+        # Set up and start the dashboard with exporters
+        dashboard = setup_dashboard(
+            monitoring_system=monitoring,
+            host="0.0.0.0",
+            port=8050,
+            refresh_interval=5,
+            debug=False,
+            start_web=True,
+            console_export_interval=60,
+            prometheus_port=9090,
+            enable_console_exporter=True,
+            enable_prometheus_exporter=True
+        )
+        
+        # Generate a Grafana dashboard
+        if GRAFANA_AVAILABLE:
+            grafana_file = dashboard.generate_grafana_dashboard()
+            print(f"Grafana dashboard saved to: {grafana_file}")
+        
+        # Keep the script running
+        try:
+            print(f"Dashboard running at http://0.0.0.0:8050")
+            print(f"Prometheus metrics available at http://0.0.0.0:9090")
+            print("Press Ctrl+C to stop")
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("Dashboard stopped by user")
+            dashboard.shutdown()
+    
+    except ImportError:
+        logger.error("Could not import monitoring system. Make sure it's properly set up.")
+        exit(1)
