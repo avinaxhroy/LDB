@@ -12,6 +12,23 @@ from typing import Dict, Any, List, Optional
 from app.monitoring.exporters.console import ConsoleExporter
 from app.monitoring.exporters.prometheus import PrometheusExporter
 
+# Set matplotlib configuration directory to a writable location
+os.environ['MPLCONFIGDIR'] = '/tmp/matplotlib'
+# Ensure the directory exists
+os.makedirs('/tmp/matplotlib', exist_ok=True)
+
+# Ensure log directory exists
+log_dir = os.environ.get('LOG_DIR', '/var/log/ldb/dashboard')
+if log_dir:
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+    except Exception as e:
+        print(f"Warning: Could not create log directory {log_dir}: {e}")
+        log_dir = '/tmp'
+else:
+    print("Warning: LOG_DIR environment variable is not set. Using /tmp for logs.")
+    log_dir = '/tmp'
+
 # Dashboard visualization libraries
 try:
     import dash
@@ -29,7 +46,7 @@ except ImportError:
 try:
     from grafanalib.core import (
         Dashboard, Graph, Row, Target, GridPos, 
-        YAxes, YAxis, SECONDS_FORMAT,
+        YAxes, YAxis, SECONDS_FORMAT, Time,
         single_y_axis, Stat, TimeSeries, RowPanel
     )
     from grafanalib._gen import DashboardEncoder
@@ -553,9 +570,6 @@ class MonitoringDashboard:
                 logger.error(f"Error updating CPU/memory graph: {str(e)}")
                 return go.Figure().update_layout(title=f"Error: {str(e)}")
         
-        # Add more callbacks for other graphs and components...
-        # This would include disk usage, process details, database metrics, etc.
-        
         # Debug tools - Capture system state
         @app.callback(
             Output("capture-state-result", "children"),
@@ -603,7 +617,8 @@ class MonitoringDashboard:
         def run_dashboard():
             try:
                 logger.info(f"Starting web dashboard on http://{self.host}:{self.port}")
-                self.app.run_server(host=self.host, port=self.port, debug=self.debug)
+                # Use app.run instead of app.run_server
+                self.app.run(host=self.host, port=self.port, debug=self.debug)
             except Exception as e:
                 logger.error(f"Error running web dashboard: {str(e)}")
         
@@ -683,7 +698,7 @@ class MonitoringDashboard:
             description="Comprehensive monitoring for application performance and health",
             refresh="10s",
             tags=["monitoring", "application", "performance"],
-            time={"from": "now-1h", "to": "now"},
+            time=Time(start="now-1h", end="now"),  # Use Time object instead of dict
             timezone="browser",
             rows=[
                 # System metrics row
