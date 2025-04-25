@@ -55,6 +55,8 @@ except ImportError:
     GRAFANA_AVAILABLE = False
     logging.warning("Grafanalib not installed. Grafana dashboard generation will not be available. Install with: pip install grafanalib")
 
+from app.monitoring.core import setup_monitoring
+
 logger = logging.getLogger(__name__)
 
 class MonitoringDashboard:
@@ -595,6 +597,133 @@ class MonitoringDashboard:
                 logger.error(f"Error capturing system state: {str(e)}")
                 return html.P(f"Error capturing system state: {str(e)}", style={"color": "red"})
         
+        # Database Connections Graph
+        @app.callback(
+            Output("db-connections-graph", "figure"),
+            Input("interval-component", "n_intervals")
+        )
+        def update_db_connections(n):
+            comp = self.monitoring.components.get("database")
+            if not comp:
+                return go.Figure().update_layout(title="No database metrics available")
+            m = comp.get_current_metrics()
+            fig = go.Figure([go.Bar(x=[m.get("timestamp")], y=[m.get("connection_count", 0)])])
+            fig.update_layout(title="Database Connections", xaxis_title="Time", yaxis_title="Connections")
+            return fig
+
+        # Table Record Counts Graph
+        @app.callback(
+            Output("table-records-graph", "figure"),
+            Input("interval-component", "n_intervals")
+        )
+        def update_table_records(n):
+            comp = self.monitoring.components.get("database")
+            if not comp:
+                return go.Figure().update_layout(title="No database metrics available")
+            m = comp.get_current_metrics()
+            rec = m.get("record_counts", {})
+            valid = [(t, c) for t, c in rec.items() if isinstance(c, (int, float))]
+            if not valid:
+                return go.Figure().update_layout(title="No table record counts available")
+            tables, counts = zip(*valid)
+            fig = go.Figure([go.Bar(x=list(tables), y=list(counts))])
+            fig.update_layout(title="Table Record Counts", xaxis_title="Table", yaxis_title="Count")
+            return fig
+
+        # Database Status Info
+        @app.callback(
+            Output("db-status-info", "children"),
+            Input("interval-component", "n_intervals")
+        )
+        def update_db_status(n):
+            comp = self.monitoring.components.get("database")
+            if not comp:
+                return html.P("No database metrics component", style={"color": "gray"})
+            m = comp.get_current_metrics()
+            status = m.get("status", "unknown")
+            return html.P(f"Database status: {status}")
+
+        # HTTP Requests Graph
+        @app.callback(
+            Output("http-requests-graph", "figure"),
+            Input("interval-component", "n_intervals")
+        )
+        def update_http_requests(n):
+            comp = self.monitoring.components.get("application_metrics")
+            if not comp:
+                return go.Figure().update_layout(title="No application metrics available")
+            metrics = comp.get_metrics()
+            # Plot total HTTP requests
+            total = metrics.get("http_requests_total", {}).get("values", {}).get("default", 0)
+            fig = go.Figure([go.Bar(x=["Total HTTP Requests"], y=[total])])
+            fig.update_layout(title="Total HTTP Requests")
+            return fig
+
+        # Custom Metrics Container
+        @app.callback(
+            Output("custom-metrics-container", "children"),
+            Input("interval-component", "n_intervals")
+        )
+        def update_custom_metrics(n):
+            metrics = self.monitoring.get_metrics().get("application_metrics", {})
+            return html.Pre(json.dumps(metrics, indent=2))
+
+        # Health Status Container
+        @app.callback(
+            Output("health-status-container", "children"),
+            Input("interval-component", "n_intervals")
+        )
+        def update_health_container(n):
+            h = self.monitoring.get_health()
+            return html.Pre(json.dumps(h, indent=2))
+
+        # Health History Graph
+        @app.callback(
+            Output("health-history-graph", "figure"),
+            Input("interval-component", "n_intervals")
+        )
+        def update_health_history(n):
+            comp = self.monitoring.components.get("health_checks")
+            if not comp:
+                return go.Figure().update_layout(title="No health history available")
+            hist = comp.get_health_history()
+            timestamps = [entry.get("timestamp") for entry in hist]
+            statuses = [1 if entry.get("overall_status") else 0 for entry in hist]
+            fig = go.Figure([go.Scatter(x=timestamps, y=statuses, mode='lines+markers')])
+            fig.update_layout(
+                title="Health Check History",
+                yaxis=dict(tickvals=[0,1], ticktext=["Unhealthy","Healthy"]) 
+            )
+            return fig
+
+        # Recent Errors Container
+        @app.callback(
+            Output("recent-errors-container", "children"),
+            Input("interval-component", "n_intervals")
+        )
+        def update_recent_errors(n):
+            errors = []
+            sys_comp = self.monitoring.components.get("system_metrics")
+            db_comp = self.monitoring.components.get("database")
+            if sys_comp:
+                errors.extend(getattr(sys_comp, 'recent_errors', []))
+            if db_comp and hasattr(db_comp, 'get_recent_errors'):
+                errors.extend(db_comp.get_recent_errors())
+            if not errors:
+                return html.P("No recent errors", style={"color": "green"})
+            # Build list of errors
+            items = []
+            for err in errors:
+                timestamp = err.get('timestamp', '')
+                message = err.get('error_message', err.get('error', str(err)))
+                traceback_text = err.get('traceback', '')
+                items.append(html.Div([
+                    html.Strong(timestamp),
+                    html.P(message),
+                    html.Pre(traceback_text)
+                ], style={"borderBottom": "1px solid #ddd", "padding": "5px"}))
+            return html.Div(items)
+
         # Add interval component for automatic updates
         app.layout.children.append(
             dcc.Interval(
@@ -814,6 +943,9 @@ def setup_dashboard(monitoring_system=None, host="0.0.0.0", port=8050,
     Returns:
         The MonitoringDashboard instance
     """
+    # Initialize monitoring components if none or empty
+    if monitoring_system is None or not getattr(monitoring_system, 'components', {}):
+        monitoring_system = setup_monitoring(app=None, db_engine=None)
     dashboard = MonitoringDashboard(
         monitoring_system=monitoring_system,
         host=host,

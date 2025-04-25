@@ -286,7 +286,7 @@ def setup_monitoring(app=None, db_engine=None, config: Optional[MonitoringConfig
     if monitoring.config.enable_application_metrics:
         try:
             app_metrics = ApplicationMetrics(app=app)
-            monitoring.register_component("application", app_metrics)
+            monitoring.register_component("application_metrics", app_metrics)
             logger.info("Registered ApplicationMetrics")
         except Exception as e:
             logger.error(f"Failed to initialize ApplicationMetrics: {str(e)}")
