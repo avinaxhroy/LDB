@@ -135,7 +135,6 @@ class Artist(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
-    songs = relationship("Song", back_populates="artist")
     voice_fingerprint = relationship("VoiceFingerprint", back_populates="artist", uselist=False)
 
 class SongEmbedding(Base):
@@ -225,4 +224,3 @@ Song.embeddings = relationship("SongEmbedding", back_populates="song")
 Song.fingerprints = relationship("AudioFingerprint", back_populates="song")
 Song.genre_tags = relationship("GenreTag", back_populates="song")
 Song.user_interactions = relationship("UserSongInteraction", back_populates="song")
-Song.artist = relationship("Artist", back_populates="songs")
