@@ -148,6 +148,9 @@ class SongDetail(SongBase):
 # Initialize monitoring and application at startup
 @app.on_event("startup")
 async def startup_event():
+    # Create database tables if they don't exist
+    from app.db.models import Base
+    Base.metadata.create_all(bind=engine)
     # Setup comprehensive monitoring
     setup_monitoring(app, engine)
     logger.info("Enhanced monitoring system initialized")
@@ -184,6 +187,12 @@ async def startup_event():
     # Initialize scheduler
     initialize_scheduler()
     logger.info("Task scheduler initialized")
+    # Trigger initial data population synchronously
+    from app.scheduler.jobs import collect_from_reddit, collect_from_youtube, enrich_with_spotify, fetch_lyrics
+    collect_from_reddit()
+    collect_from_youtube()
+    enrich_with_spotify()
+    fetch_lyrics()
     
     # Import artist queue to ensure worker thread starts
     from app.collectors.artist_queue import worker_thread

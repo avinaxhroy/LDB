@@ -2,11 +2,10 @@
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
 import datetime
 import logging
+from app.core.config import settings
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -14,75 +13,103 @@ logger = logging.getLogger(__name__)
 
 
 def collect_from_reddit():
-    """Schedule Reddit collection as a Celery task"""
-    from app.worker import collect_from_reddit_task
-    collect_from_reddit_task.delay()
+    """Run Reddit collection synchronously"""
+    from app.collectors.reddit import reddit_collector
+    db = SessionLocal()
+    try:
+        reddit_collector.run(db)
+    finally:
+        db.close()
 
 
 def collect_from_youtube():
-    """Schedule YouTube collection as a Celery task"""
-    from app.worker import collect_from_youtube_task
-    collect_from_youtube_task.delay()
+    """Run YouTube collection synchronously"""
+    from app.collectors.youtube import youtube_collector
+    db = SessionLocal()
+    try:
+        youtube_collector.run(db)
+    finally:
+        db.close()
 
 
 def collect_from_blogs():
-    """Schedule blog collection as a Celery task"""
-    from app.worker import collect_from_blogs_task
-    collect_from_blogs_task.delay()
+    """Run blog collection synchronously"""
+    from app.collectors.blogs import blog_collector
+    db = SessionLocal()
+    try:
+        blog_collector.run(db)
+    finally:
+        db.close()
 
 
 def collect_from_instagram():
-    """Schedule Instagram collection as a Celery task"""
-    from app.worker import collect_from_instagram_task
-    collect_from_instagram_task.delay()
+    """Run Instagram collection synchronously"""
+    from app.collectors.instagram import instagram_collector
+    db = SessionLocal()
+    try:
+        instagram_collector.run(db)
+    finally:
+        db.close()
 
 
 def enrich_with_spotify():
-    """Schedule Spotify enrichment as a Celery task"""
-    from app.worker import enrich_with_spotify_task
-    enrich_with_spotify_task.delay()
+    """Run Spotify enrichment synchronously"""
+    from app.enrichers.spotify import spotify_enricher
+    db = SessionLocal()
+    try:
+        spotify_enricher.run(db, limit=settings.COLLECTION_BATCH_SIZE)
+    finally:
+        db.close()
 
 
 def fetch_lyrics():
-    """Schedule lyrics fetching as a Celery task"""
-    from app.worker import fetch_lyrics_task
-    fetch_lyrics_task.delay()
+    """Run lyrics fetching synchronously"""
+    from app.enrichers.lyrics import lyrics_fetcher
+    db = SessionLocal()
+    try:
+        lyrics_fetcher.run(db, limit=settings.COLLECTION_BATCH_SIZE)
+    finally:
+        db.close()
 
 
 def analyze_with_llm():
-    """Schedule LLM analysis as a Celery task"""
-    from app.worker import analyze_with_llm_task
-    analyze_with_llm_task.delay()
+    """Run LLM analysis synchronously"""
+    from app.analysis.llm import llm_analyzer
+    db = SessionLocal()
+    try:
+        llm_analyzer.run(db, limit=settings.LLM_BATCH_SIZE, batch_size=settings.LLM_BATCH_SIZE)
+    finally:
+        db.close()
 
 
 def calculate_engagement_scores():
-    """Schedule engagement score calculation as a Celery task"""
+    """Run engagement score calculation synchronously"""
     from app.worker import calculate_engagement_scores_task
-    calculate_engagement_scores_task.delay()
+    calculate_engagement_scores_task.run()
 
 
 def process_embeddings_job():
-    """Process embeddings for songs without embeddings"""
+    """Process embeddings for songs without embeddings synchronously"""
     from app.worker import process_embeddings
-    process_embeddings.delay(100)
+    process_embeddings.run(limit=100)
 
 
 def process_genre_tags_job():
-    """Process genre tags for songs"""
+    """Process genre tags for songs synchronously"""
     from app.worker import process_genre_tags
-    process_genre_tags.delay(200)
+    process_genre_tags.run(limit=200)
 
 
 def optimize_database_job():
-    """Run database optimization"""
+    """Run database optimization synchronously"""
     from app.worker import optimize_database
-    optimize_database.delay()
+    optimize_database.run()
 
 
 def update_trending_job():
-    """Update trending songs and artists"""
+    """Update trending songs and artists synchronously"""
     from app.worker import update_trending
-    update_trending.delay()
+    update_trending.run()
 
 
 def initialize_scheduler():
