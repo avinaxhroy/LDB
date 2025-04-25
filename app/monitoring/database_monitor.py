@@ -8,7 +8,6 @@ from typing import Dict, List, Any, Optional
 
 from sqlalchemy import text, create_engine, inspect
 from sqlalchemy.engine import Engine
-from sqlalchemy.engine.reflection import Inspector
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +16,15 @@ class DatabaseMonitor:
     """Database performance and health monitoring"""
 
     def __init__(self, engine: Engine, interval: int = 60, history_size: int = 60):
-        self.engine = engine
+        # Initialize engine: accept Engine instance or connection URL string
+        if isinstance(engine, str):
+            try:
+                self.engine = create_engine(engine)
+            except Exception as e:
+                logger.error(f"Failed to create engine with URL {engine}: {e}")
+                raise
+        else:
+            self.engine = engine
         self.interval = interval
         self.history_size = history_size
         self.thread = None
@@ -60,7 +67,8 @@ class DatabaseMonitor:
             # Get column info for each table
             for table in tables:
                 columns = inspector.get_columns(table)
-                primary_key = Inspector.from_engine(self.engine).get_pk_constraint(table).get('constrained_columns', [])
+                # Use inspector to get primary key constraint
+                primary_key = inspector.get_pk_constraint(table).get('constrained_columns', [])
                 foreign_keys = inspector.get_foreign_keys(table)
 
                 schema_info["table_details"][table] = {

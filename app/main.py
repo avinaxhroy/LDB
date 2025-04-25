@@ -233,11 +233,10 @@ async def system_metrics():
 @app.get("/metrics/database")
 async def database_metrics():
     """Get current database metrics"""
-    db_monitor_component = monitoring.components.get("database_monitor")
+    db_monitor_component = monitoring.components.get("database")
     if db_monitor_component:
         return db_monitor_component.get_current_metrics()
-    
-    logger.warning("DatabaseMonitor component not found in monitoring system for /metrics/database endpoint.")
+    logger.warning("Database component not found in monitoring system for /metrics/database endpoint.")
     raise HTTPException(status_code=404, detail="Database metrics not available")
 
 @app.get("/metrics/application")
