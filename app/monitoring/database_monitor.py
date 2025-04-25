@@ -147,7 +147,7 @@ class DatabaseMonitor:
         msg = str(exc).lower()
         if 'permission' in msg or 'denied' in msg or 'not allowed' in msg:
             return ("Permission denied", f"Check DB user permissions for table '{table_name}'")
-        if 'does not exist' in msg or 'no such table' in msg or 'unknown table' in msg:
+        if 'does not exist' in msg or 'no such table' in msg or 'unknown table':
             return ("Table missing", f"Table '{table_name}' does not exist. Check migrations or spelling.")
         if 'syntax' in msg or 'parse error' in msg:
             return ("SQL syntax error", f"Check SQL syntax: {sql}")
@@ -202,8 +202,13 @@ class DatabaseMonitor:
                                 WHERE relname = '{table_name}'
                             """)
                             raw_estimate = conn.execute(size_query).scalar() or 0
-                            # Clamp negative estimates (e.g., when statistics are unavailable)
-                            estimated_size = raw_estimate if raw_estimate > 0 else 0
+                            if raw_estimate > 0:
+                                # Use estimate when available
+                                estimated_size = int(raw_estimate)
+                            else:
+                                # Fallback to actual count when no estimate
+                                actual = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar() or 0
+                                estimated_size = int(actual)
                             metrics["record_counts"][table_name] = estimated_size
                         else:
                             count_sql = f"SELECT COUNT(*) FROM {table_name}"

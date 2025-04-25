@@ -161,13 +161,13 @@ async def startup_event():
         # Custom Spotify API health check
         def check_spotify_api():
             try:
-                sp = spotify_auth.get_spotify_client()
-                if not sp:
-                    return False, "Failed to get Spotify client (authentication issue?)"
-                sp.current_user()
-                return True, "Spotify API is accessible and authenticated"
+                healthy = spotify_auth.check_token_health()
+                if healthy:
+                    return True, "Spotify API token is valid and accessible"
+                else:
+                    return False, "Spotify API token is invalid or inaccessible"
             except Exception as e:
-                logger.warning(f"Spotify API health check failed: {str(e)}")
+                logger.warning(f"Spotify API health check error: {str(e)}")
                 return False, f"Spotify API check failed: {str(e)}"
         
         # Register our custom Spotify health check
