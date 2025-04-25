@@ -69,7 +69,7 @@ class MonitoringDashboard:
     It integrates all monitoring components into a single interface.
     """
     
-    def __init__(self, monitoring_system=None, host="127.0.0.1", port=8050, 
+    def __init__(self, monitoring_system=None, host="0.0.0.0", port=8050, 
                  refresh_interval=10, debug=False,
                  console_export_interval=60,
                  prometheus_port=9090,
@@ -792,7 +792,7 @@ class MonitoringDashboard:
             ],
         )
 
-def setup_dashboard(monitoring_system=None, host="127.0.0.1", port=8050, 
+def setup_dashboard(monitoring_system=None, host="0.0.0.0", port=8050, 
                    refresh_interval=10, debug=False, start_web=True,
                    console_export_interval=60, prometheus_port=9090,
                    enable_console_exporter=True, enable_prometheus_exporter=True):
@@ -860,7 +860,7 @@ if __name__ == "__main__":
         # Set up and start the dashboard with exporters
         dashboard = setup_dashboard(
             monitoring_system=monitoring,
-            host="127.0.0.1",
+            host="0.0.0.0",
             port=8050,
             refresh_interval=5,
             debug=False,
@@ -878,8 +878,8 @@ if __name__ == "__main__":
         
         # Keep the script running
         try:
-            print(f"Dashboard running at http://127.0.0.1:8050")
-            print(f"Prometheus metrics available at http://127.0.0.1:9090")
+            print(f"Dashboard running at http://0.0.0.0:8050")
+            print(f"Prometheus metrics available at http://0.0.0.0:9090")
             print("Press Ctrl+C to stop")
             while True:
                 time.sleep(1)

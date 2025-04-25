@@ -215,7 +215,7 @@ class HealthCheckService:
         results = {}
         all_passed = True
 
-        for name, check in self.checks.items():
+        for name, check in list(self.checks.items()):
             try:
                 status, message = check["func"]()
                 results[name] = {
