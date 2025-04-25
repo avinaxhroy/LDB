@@ -201,7 +201,9 @@ class DatabaseMonitor:
                                 SELECT reltuples::bigint FROM pg_class 
                                 WHERE relname = '{table_name}'
                             """)
-                            estimated_size = conn.execute(size_query).scalar() or 0
+                            raw_estimate = conn.execute(size_query).scalar() or 0
+                            # Clamp negative estimates (e.g., when statistics are unavailable)
+                            estimated_size = raw_estimate if raw_estimate > 0 else 0
                             metrics["record_counts"][table_name] = estimated_size
                         else:
                             count_sql = f"SELECT COUNT(*) FROM {table_name}"

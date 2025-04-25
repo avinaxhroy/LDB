@@ -177,6 +177,21 @@ class SpotifyAuth:
             logger.error(f"Error checking Spotify token health: {str(e)}")
             return False
 
+    def get_spotify_client(self):
+        """
+        Get a Spotipy client instance using the current access token.
+        """
+        try:
+            import spotipy
+            token = self.get_access_token()
+            if not token:
+                logger.error("Unable to retrieve Spotify access token for client creation")
+                return None
+            return spotipy.Spotify(auth=token)
+        except ImportError:
+            logger.error("Spotipy library not installed. Install with: pip install spotipy")
+            return None
+
 
 # Singleton instance
 spotify_auth = SpotifyAuth()
