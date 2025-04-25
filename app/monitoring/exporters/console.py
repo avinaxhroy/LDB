@@ -93,9 +93,17 @@ class ConsoleExporter:
                 # Get record counts
                 tables = db.get("record_counts", {})
                 if tables:
-                    # Sort tables by count and take top 5
-                    top_tables = sorted(tables.items(), key=lambda x: x[1] if x[1] >= 0 else 0, reverse=True)[:5]
-                    table_info = ", ".join([f"{name}: {count}" for name, count in top_tables])
+                    # Sort tables by count (None treated as lowest) and take top 5
+                    top_tables = sorted(
+                        tables.items(),
+                        key=lambda x: x[1] if isinstance(x[1], (int, float)) else -1,
+                        reverse=True
+                    )[:5]
+                    # Format summary, show 'error' for unavailable counts
+                    table_info = ", ".join([
+                        f"{name}: {count}" if count is not None else f"{name}: error"
+                        for name, count in top_tables
+                    ])
                     if len(tables) > 5:
                         table_info += f" (+{len(tables) - 5} more tables)"
                 else:

@@ -56,6 +56,8 @@ class DatabaseMonitor:
         try:
             inspector = inspect(self.engine)
             tables = inspector.get_table_names()
+            # Exclude migration/version tables from monitoring
+            tables = [t for t in tables if t.lower() not in ('alembic_version',)]
 
             schema_info = {
                 "tables": tables,
@@ -222,7 +224,8 @@ class DatabaseMonitor:
                         logger.error(
                             f"Error counting records in {table_name}: {e}\nReason: {reason}\nSuggestion: {suggestion}\nTraceback: {tb}"
                         )
-                        metrics["record_counts"][table_name] = -1
+                        # Mark record count as unavailable
+                        metrics["record_counts"][table_name] = None
 
                 # Database-specific metrics
                 if self.engine.dialect.name == 'postgresql':
@@ -434,11 +437,12 @@ class DatabaseMonitor:
         # Create a compact summary of table record counts
         table_counts = metrics["record_counts"]
         if table_counts:
-            # Sort by count (descending) and take top 5
-            top_tables = sorted(table_counts.items(), key=lambda x: x[1] if x[1] >= 0 else 0, reverse=True)[:5]
-            counts_summary = ", ".join([f"{t}: {c}" for t, c in top_tables])
-            if len(table_counts) > 5:
-                counts_summary += f" (+{len(table_counts) - 5} more tables)"
+            # Sort by count (descending), treat None as lowest
+            top_tables = sorted(table_counts.items(), key=lambda x: x[1] if isinstance(x[1], (int, float)) else -1, reverse=True)[:5]
+            # Format summary, show 'error' for unavailable counts
+            counts_summary = ", ".join([
+                f"{t}: {c}" if c is not None else f"{t}: error" for t, c in top_tables
+            ])
         else:
             counts_summary = "No tables"
             
