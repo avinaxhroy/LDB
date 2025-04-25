@@ -1,12 +1,12 @@
-fastapi==0.103.1
-uvicorn[standard]==0.23.2
-sqlalchemy==2.0.20
-psycopg2-binary==2.9.7
-redis==4.6.0
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+redis
 celery[redis]
-requests==2.31.0
-beautifulsoup4==4.12.2
-python-dotenv==1.0.0
+requests
+beautifulsoup4
+python-dotenv
 # Monitoring & System
 psutil
 prometheus-client
@@ -15,22 +15,23 @@ opentelemetry-api
 opentelemetry-sdk
 # OTLP Exporter (adjust if using Jaeger, Zipkin, etc.)
 opentelemetry-exporter-otlp
+opentelemetry-proto
 # Instrumentations
 opentelemetry-instrumentation-fastapi
 opentelemetry-instrumentation-sqlalchemy
 opentelemetry-instrumentation-requests
 opentelemetry-instrumentation-celery
 # Add other dependencies below
-spotipy==2.23.0
+spotipy
 # Add other libraries used by collectors, enrichers, analysis, etc.
 # e.g., praw, google-api-python-client, lyricsgenius, transformers, torch, scikit-learn
-praw==7.7.1
-google-api-python-client==2.97.0
-apscheduler==3.10.4
-alembic==1.12.0
-aiohttp==3.8.5
-streamlit==1.33.0
-pandas==2.2.2
+praw
+google-api-python-client
+apscheduler
+alembic
+aiohttp
+streamlit
+pandas
 
 # Dashboard and visualization dependencies
 dash
